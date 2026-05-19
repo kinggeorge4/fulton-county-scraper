@@ -72,19 +72,28 @@ jobs:
           GSCCCA_PASSWORD: ${{ secrets.GSCCCA_PASSWORD }}
         run: python scraper/fetch.py
 
-      # ── Commit outputs ─────────────────────────────────────────────────────
-      - name: Commit updated records.json files
+      # ── Commit & push outputs ──────────────────────────────────────────────
+      - name: Commit and push records
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --local user.email "atlas-bot@propstor.com"
           git config --local user.name "Atlas Scraper Bot"
-          git add dashboard/records.json data/records.json data/ghl_export.csv || true
-          git diff --cached --quiet || git commit -m "🤖 Auto-update: Fulton County leads $(date -u +'%Y-%m-%d %H:%M UTC')"
 
-      - name: Push changes
-        uses: ad-m/github-push-action@v0.8.0
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          branch: ${{ github.ref }}
+          # Stage output files (ignore if missing)
+          git add dashboard/records.json data/records.json data/ghl_export.csv 2>/dev/null || true
+
+          # Only commit if there are staged changes
+          if git diff --cached --quiet; then
+            echo "No changes to commit – records unchanged since last run"
+            exit 0
+          fi
+
+          git commit -m "🤖 Auto-update: GA motivated seller leads $(date -u +'%Y-%m-%d %H:%M UTC')"
+
+          # Pull any remote changes that arrived since checkout, then push
+          git pull --rebase origin main
+          git push origin HEAD:main
 
   # ── Deploy dashboard to GitHub Pages ─────────────────────────────────────
   deploy-pages:
