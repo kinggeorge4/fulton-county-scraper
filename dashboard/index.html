@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fulton County Motivated Seller Leads</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }
+    .header { background: linear-gradient(135deg, #1a1f2e 0%, #0d1117 100%); border-bottom: 1px solid #2d3748; padding: 1.5rem 2rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem; }
+    .header h1 { font-size: 1.5rem; font-weight: 700; color: #f7fafc; }
+    .header h1 span { color: #f6ad55; }
+    .badge { background: #2d3748; border: 1px solid #4a5568; border-radius: 20px; padding: 0.3rem 0.8rem; font-size: 0.75rem; color: #a0aec0; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1rem; padding: 1.5rem 2rem; background: #0d1117; border-bottom: 1px solid #2d3748; }
+    .stat-card { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 8px; padding: 1rem; text-align: center; }
+    .stat-card .value { font-size: 2rem; font-weight: 700; color: #f6ad55; }
+    .stat-card .label { font-size: 0.75rem; color: #718096; margin-top: 0.25rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .controls { padding: 1rem 2rem; display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; background: #0d1117; border-bottom: 1px solid #2d3748; }
+    .search-box { flex: 1; min-width: 200px; background: #1a1f2e; border: 1px solid #2d3748; border-radius: 6px; padding: 0.5rem 1rem; color: #e2e8f0; font-size: 0.9rem; }
+    .search-box:focus { outline: none; border-color: #f6ad55; }
+    .filter-btn { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 6px; padding: 0.5rem 1rem; color: #a0aec0; font-size: 0.8rem; cursor: pointer; transition: all 0.2s; }
+    .filter-btn:hover, .filter-btn.active { background: #f6ad55; color: #1a1f2e; border-color: #f6ad55; font-weight: 600; }
+    .export-btn { background: #276749; border: 1px solid #2f855a; border-radius: 6px; padding: 0.5rem 1rem; color: #68d391; font-size: 0.8rem; cursor: pointer; }
+    .export-btn:hover { background: #2f855a; }
+    .table-container { overflow-x: auto; padding: 0 2rem 2rem; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1rem; font-size: 0.82rem; }
+    thead th { background: #1a1f2e; color: #a0aec0; font-weight: 600; padding: 0.75rem 0.6rem; text-align: left; border-bottom: 2px solid #2d3748; white-space: nowrap; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer; user-select: none; }
+    thead th:hover { color: #f6ad55; }
+    thead th.sort-asc::after { content: ' ↑'; color: #f6ad55; }
+    thead th.sort-desc::after { content: ' ↓'; color: #f6ad55; }
+    tbody tr { border-bottom: 1px solid #1a1f2e; transition: background 0.15s; }
+    tbody tr:hover { background: #1a1f2e; }
+    td { padding: 0.65rem 0.6rem; vertical-align: top; }
+    .score-badge { display: inline-block; border-radius: 4px; padding: 0.15rem 0.4rem; font-weight: 700; font-size: 0.78rem; min-width: 32px; text-align: center; }
+    .score-high { background: #22543d; color: #68d391; }
+    .score-mid { background: #744210; color: #f6ad55; }
+    .score-low { background: #2d3748; color: #718096; }
+    .flag-tag { display: inline-block; background: #2d3748; border-radius: 3px; padding: 0.1rem 0.35rem; font-size: 0.68rem; color: #a0aec0; margin: 1px; white-space: nowrap; }
+    .flag-tag.lp { background: #7b341e; color: #fc8181; }
+    .flag-tag.fc { background: #652b19; color: #feb2b2; }
+    .flag-tag.tax { background: #322659; color: #b794f4; }
+    .flag-tag.jud { background: #1a365d; color: #90cdf4; }
+    .flag-tag.mech { background: #1c4532; color: #9ae6b4; }
+    .flag-tag.new { background: #1a365d; color: #63b3ed; }
+    .doc-link { color: #63b3ed; text-decoration: none; font-size: 0.75rem; }
+    .doc-link:hover { color: #90cdf4; text-decoration: underline; }
+    .amount-cell { white-space: nowrap; color: #68d391; font-weight: 600; }
+    .type-badge { display: inline-block; background: #2d3748; border-radius: 3px; padding: 0.15rem 0.4rem; font-size: 0.72rem; color: #e2e8f0; font-weight: 600; font-family: monospace; }
+    .empty-state { text-align: center; padding: 4rem 2rem; color: #4a5568; }
+    .empty-state h2 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+    .pagination { display: flex; justify-content: center; align-items: center; gap: 0.5rem; padding: 1.5rem 2rem; }
+    .page-btn { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 4px; padding: 0.4rem 0.75rem; color: #a0aec0; font-size: 0.8rem; cursor: pointer; }
+    .page-btn:hover, .page-btn.active { background: #f6ad55; color: #1a1f2e; border-color: #f6ad55; font-weight: 600; }
+    .page-btn:disabled { opacity: 0.3; cursor: default; }
+    .fetched-at { font-size: 0.72rem; color: #4a5568; }
+    @media (max-width: 768px) {
+      .header { padding: 1rem; }
+      .stats { padding: 1rem; }
+      .controls { padding: 0.75rem 1rem; }
+      .table-container { padding: 0 1rem 1rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Fulton County <span>Motivated Seller Leads</span></h1>
+    <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
+      <span class="badge" id="recordCount">0 records</span>
+      <span class="badge fetched-at" id="fetchedAt">Not yet fetched</span>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div class="stat-card"><div class="value" id="statTotal">0</div><div class="label">Total Leads</div></div>
+    <div class="stat-card"><div class="value" id="statWithAddr">0</div><div class="label">With Address</div></div>
+    <div class="stat-card"><div class="value" id="statHighScore">0</div><div class="label">Score ≥ 70</div></div>
+    <div class="stat-card"><div class="value" id="statLP">0</div><div class="label">Lis Pendens</div></div>
+    <div class="stat-card"><div class="value" id="statFC">0</div><div class="label">Foreclosure</div></div>
+    <div class="stat-card"><div class="value" id="statNew">0</div><div class="label">New This Week</div></div>
+  </div>
+
+  <div class="controls">
+    <input type="text" class="search-box" id="searchBox" placeholder="Search owner, address, doc number...">
+    <button class="filter-btn active" data-filter="all">All</button>
+    <button class="filter-btn" data-filter="LP">Lis Pendens</button>
+    <button class="filter-btn" data-filter="NOFC">Foreclosure</button>
+    <button class="filter-btn" data-filter="TAX">Tax</button>
+    <button class="filter-btn" data-filter="JUD">Judgment</button>
+    <button class="filter-btn" data-filter="LN">Liens</button>
+    <button class="filter-btn" data-filter="PRO">Probate</button>
+    <button class="filter-btn" data-filter="HIGH">Score 70+</button>
+    <button class="export-btn" id="exportBtn">⬇ Export GHL CSV</button>
+  </div>
+
+  <div class="table-container">
+    <table id="leadsTable">
+      <thead>
+        <tr>
+          <th data-col="score">Score</th>
+          <th data-col="filed">Filed</th>
+          <th data-col="doc_type">Type</th>
+          <th data-col="owner">Owner</th>
+          <th data-col="prop_address">Property Address</th>
+          <th data-col="mail_address">Mailing Address</th>
+          <th data-col="amount">Amount</th>
+          <th data-col="flags">Flags</th>
+          <th data-col="doc_num">Doc #</th>
+        </tr>
+      </thead>
+      <tbody id="tableBody">
+      </tbody>
+    </table>
+    <div class="empty-state" id="emptyState" style="display:none;">
+      <h2>No records yet</h2>
+      <p>Records will appear here after the scraper runs. Trigger it manually via GitHub Actions.</p>
+    </div>
+  </div>
+  <div class="pagination" id="pagination"></div>
+
+<script>
+const PAGE_SIZE = 50;
+let allRecords = [], filtered = [], currentPage = 1, sortCol = 'score', sortDir = 'desc', activeFilter = 'all', searchQuery = '';
+
+function formatAmount(v) {
+  if (!v || v === 0) return '';
+  return '$' + Number(v).toLocaleString();
+}
+
+function formatDate(s) {
+  if (!s) return '';
+  const d = new Date(s);
+  if (isNaN(d)) return s;
+  return d.toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'});
+}
+
+function scoreClass(s) {
+  if (s >= 70) return 'score-high';
+  if (s >= 50) return 'score-mid';
+  return 'score-low';
+}
+
+function flagClass(f) {
+  if (f.includes('Lis pendens')) return 'lp';
+  if (f.includes('foreclosure') || f.includes('Pre-')) return 'fc';
+  if (f.includes('Tax')) return 'tax';
+  if (f.includes('Judgment')) return 'jud';
+  if (f.includes('Mechanic') || f.includes('lien')) return 'mech';
+  if (f.includes('New')) return 'new';
+  return '';
+}
+
+function renderRow(r) {
+  const addr = [r.prop_address, r.prop_city, r.prop_state].filter(Boolean).join(', ');
+  const maddr = [r.mail_address, r.mail_city, r.mail_state, r.mail_zip].filter(Boolean).join(', ');
+  const flags = (r.flags || []).map(f => `<span class="flag-tag ${flagClass(f)}">${f}</span>`).join('');
+  const docLink = r.clerk_url ? `<a class="doc-link" href="${r.clerk_url}" target="_blank">${r.doc_num || ''} ↗</a>` : (r.doc_num || '');
+  return `<tr>
+    <td><span class="score-badge ${scoreClass(r.score || 0)}">${r.score || 0}</span></td>
+    <td>${formatDate(r.filed)}</td>
+    <td><span class="type-badge">${r.doc_type || ''}</span></td>
+    <td>${r.owner || ''}</td>
+    <td>${addr || '<span style="color:#4a5568">—</span>'}</td>
+    <td>${maddr || '<span style="color:#4a5568">—</span>'}</td>
+    <td class="amount-cell">${formatAmount(r.amount)}</td>
+    <td>${flags}</td>
+    <td>${docLink}</td>
+  </tr>`;
+}
+
+function applyFilters() {
+  const q = searchQuery.toLowerCase();
+  filtered = allRecords.filter(r => {
+    const matchSearch = !q || [r.owner, r.prop_address, r.doc_num, r.grantee, r.mail_address].some(v => v && v.toLowerCase().includes(q));
+    let matchFilter = true;
+    if (activeFilter === 'LP') matchFilter = r.cat === 'LP';
+    else if (activeFilter === 'NOFC') matchFilter = r.cat === 'FC';
+    else if (activeFilter === 'TAX') matchFilter = r.cat === 'TAX';
+    else if (activeFilter === 'JUD') matchFilter = r.cat === 'JUD';
+    else if (activeFilter === 'LN') matchFilter = r.cat === 'LIEN';
+    else if (activeFilter === 'PRO') matchFilter = r.cat === 'PRO';
+    else if (activeFilter === 'HIGH') matchFilter = (r.score || 0) >= 70;
+    return matchSearch && matchFilter;
+  });
+  filtered.sort((a, b) => {
+    let av = a[sortCol] ?? '', bv = b[sortCol] ?? '';
+    if (typeof av === 'string') av = av.toLowerCase();
+    if (typeof bv === 'string') bv = bv.toLowerCase();
+    if (av < bv) return sortDir === 'asc' ? -1 : 1;
+    if (av > bv) return sortDir === 'asc' ? 1 : -1;
+    return 0;
+  });
+  currentPage = 1;
+  renderTable();
+}
+
+function renderTable() {
+  const tbody = document.getElementById('tableBody');
+  const empty = document.getElementById('emptyState');
+  const start = (currentPage - 1) * PAGE_SIZE;
+  const page = filtered.slice(start, start + PAGE_SIZE);
+  if (filtered.length === 0) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+  } else {
+    empty.style.display = 'none';
+    tbody.innerHTML = page.map(renderRow).join('');
+  }
+  renderPagination();
+}
+
+function renderPagination() {
+  const pg = document.getElementById('pagination');
+  const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
+  if (totalPages <= 1) { pg.innerHTML = ''; return; }
+  let html = `<button class="page-btn" onclick="goPage(${currentPage-1})" ${currentPage===1?'disabled':''}>← Prev</button>`;
+  const range = [];
+  for (let i = Math.max(1, currentPage-2); i <= Math.min(totalPages, currentPage+2); i++) range.push(i);
+  if (range[0] > 1) html += '<span style="color:#4a5568;padding:0 0.5rem">…</span>';
+  range.forEach(p => html += `<button class="page-btn ${p===currentPage?'active':''}" onclick="goPage(${p})">${p}</button>`);
+  if (range[range.length-1] < totalPages) html += '<span style="color:#4a5568;padding:0 0.5rem">…</span>';
+  html += `<button class="page-btn" onclick="goPage(${currentPage+1})" ${currentPage===totalPages?'disabled':''}>Next →</button>`;
+  html += `<span style="color:#4a5568;font-size:0.75rem;margin-left:0.5rem">${filtered.length} records</span>`;
+  pg.innerHTML = html;
+}
+
+function goPage(p) { currentPage = p; renderTable(); window.scrollTo(0,0); }
+
+function updateStats(records) {
+  document.getElementById('statTotal').textContent = records.length;
+  document.getElementById('statWithAddr').textContent = records.filter(r => r.prop_address).length;
+  document.getElementById('statHighScore').textContent = records.filter(r => (r.score||0) >= 70).length;
+  document.getElementById('statLP').textContent = records.filter(r => r.cat === 'LP').length;
+  document.getElementById('statFC').textContent = records.filter(r => r.cat === 'FC').length;
+  document.getElementById('statNew').textContent = records.filter(r => r.flags && r.flags.includes('New this week')).length;
+  document.getElementById('recordCount').textContent = records.length + ' records';
+}
+
+function exportGHL() {
+  const cols = ['First Name','Last Name','Mailing Address','Mailing City','Mailing State','Mailing Zip','Property Address','Property City','Property State','Property Zip','Lead Type','Document Type','Date Filed','Document Number','Amount/Debt Owed','Seller Score','Motivated Seller Flags','Source','Public Records URL'];
+  const rows = filtered.map(r => {
+    const parts = (r.owner || '').split(/[,\s]+/);
+    const first = parts.length > 1 ? parts.slice(1).join(' ') : '';
+    const last = parts[0] || '';
+    return [first, last, r.mail_address||'', r.mail_city||'', r.mail_state||'', r.mail_zip||'', r.prop_address||'', r.prop_city||'', r.prop_state||'', r.prop_zip||'', r.cat_label||'', r.doc_type||'', r.filed||'', r.doc_num||'', r.amount||'', r.score||'', (r.flags||[]).join('; '), r.source||'Fulton County Clerk', r.clerk_url||''].map(v => '"'+String(v).replace(/"/g,'""')+'"').join(',');
+  });
+  const csv = [cols.join(','), ...rows].join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = 'ghl_export_' + new Date().toISOString().slice(0,10) + '.csv';
+  a.click();
+}
+
+async function loadData() {
+  try {
+    const res = await fetch('records.json?v=' + Date.now());
+    const data = await res.json();
+    allRecords = data.records || [];
+    if (data.fetched_at) {
+      document.getElementById('fetchedAt').textContent = 'Updated: ' + new Date(data.fetched_at).toLocaleString();
+    }
+    updateStats(allRecords);
+    applyFilters();
+  } catch(e) {
+    document.getElementById('emptyState').style.display = 'block';
+    console.error('Failed to load records:', e);
+  }
+}
+
+document.getElementById('searchBox').addEventListener('input', e => { searchQuery = e.target.value; applyFilters(); });
+document.querySelectorAll('.filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    activeFilter = btn.dataset.filter;
+    applyFilters();
+  });
+});
+document.querySelectorAll('thead th[data-col]').forEach(th => {
+  th.addEventListener('click', () => {
+    const col = th.dataset.col;
+    if (sortCol === col) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+    else { sortCol = col; sortDir = col === 'score' || col === 'amount' ? 'desc' : 'asc'; }
+    document.querySelectorAll('thead th').forEach(h => h.classList.remove('sort-asc','sort-desc'));
+    th.classList.add('sort-' + sortDir);
+    applyFilters();
+  });
+});
+document.getElementById('exportBtn').addEventListener('click', exportGHL);
+
+loadData();
+</script>
+</body>
+</html>
