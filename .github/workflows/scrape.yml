@@ -68,6 +68,8 @@ jobs:
           COUNTIES: ${{ github.event.inputs.counties || 'FULTON,CLAYTON,HOUSTON,COBB,GWINNETT,DOUGLAS' }}
           HEADLESS: ${{ github.event.inputs.headless || 'true' }}
           PYTHONUNBUFFERED: "1"
+          GSCCCA_USERNAME: ${{ secrets.GSCCCA_USERNAME }}
+          GSCCCA_PASSWORD: ${{ secrets.GSCCCA_PASSWORD }}
         run: python scraper/fetch.py
 
       # ── Commit outputs ─────────────────────────────────────────────────────

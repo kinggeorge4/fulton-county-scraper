@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Georgia Multi-County Motivated Seller Lead Scraper
-Targets the GSCCCA (Georgia Superior Court Clerks' Cooperative Authority)
-at search.gsccca.org — the real statewide public records portal.
+Targets GSCCCA (Georgia Superior Court Clerks Cooperative Authority)
+Requires GSCCCA account login via GSCCCA_USERNAME / GSCCCA_PASSWORD env vars.
 """
 
 import asyncio
@@ -17,8 +17,8 @@ import time
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urljoin, urlparse
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -30,7 +30,7 @@ except ImportError:
     HAS_DBF = False
 
 try:
-    from playwright.async_api import async_playwright, Page, Browser
+    from playwright.async_api import async_playwright, Page
     HAS_PLAYWRIGHT = True
 except ImportError:
     HAS_PLAYWRIGHT = False
@@ -38,18 +38,20 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "7"))
-HEADLESS = os.environ.get("HEADLESS", "true").lower() != "false"
+LOOKBACK_DAYS     = int(os.environ.get("LOOKBACK_DAYS", "7"))
+HEADLESS          = os.environ.get("HEADLESS", "true").lower() != "false"
+GSCCCA_USERNAME   = os.environ.get("GSCCCA_USERNAME", "")
+GSCCCA_PASSWORD   = os.environ.get("GSCCCA_PASSWORD", "")
+GSCCCA_LOGIN_URL  = "https://search.gsccca.org/Login.aspx"
+GSCCCA_SEARCH_URL = "https://search.gsccca.org/RealEstateIndex.aspx"
+GSCCCA_BASE_URL   = "https://search.gsccca.org"
+
 OUTPUT_PATHS = [
     Path("dashboard/records.json"),
     Path("data/records.json"),
 ]
 
-# GSCCCA - the real statewide GA public records portal
-GSCCCA_SEARCH_URL = "https://search.gsccca.org/RealEstateIndex.aspx"
-GSCCCA_BASE_URL   = "https://search.gsccca.org"
-
-# All 159 GA counties with their GSCCCA numeric IDs
+# All 159 GA counties with GSCCCA numeric IDs
 ALL_GA_COUNTIES = {
     "APPLING": 1, "ATKINSON": 2, "BACON": 3, "BAKER": 4, "BALDWIN": 5,
     "BANKS": 6, "BARROW": 7, "BARTOW": 8, "BEN HILL": 9, "BERRIEN": 10,
@@ -87,7 +89,6 @@ ALL_GA_COUNTIES = {
 
 DEFAULT_COUNTIES = "FULTON,CLAYTON,HOUSTON,COBB,GWINNETT,DOUGLAS"
 
-# Instrument type labels on GSCCCA (map our codes -> GSCCCA dropdown value)
 GSCCCA_INSTRUMENT_MAP = {
     "LP":       "LIS PENDENS",
     "NOFC":     "NOTICE OF FORECLOSURE",
@@ -172,7 +173,7 @@ def retry(fn, attempts=3, delay=2):
             else:
                 raise
 
-def safe_get(url: str, session=None, **kwargs):
+def safe_get(url, session=None, **kwargs):
     s = session or requests.Session()
     headers = kwargs.pop("headers", {})
     headers.setdefault("User-Agent", "Mozilla/5.0 (compatible; GAScraper/2.0)")
@@ -205,12 +206,12 @@ def normalize_name(name: str) -> List[str]:
     return list(set(variants))
 
 # ---------------------------------------------------------------------------
-# Parcel Lookup (unchanged from v1)
+# Parcel Lookup
 # ---------------------------------------------------------------------------
 
 class ParcelLookup:
     CACHE_FILE = Path("parcel_cache/parcels.json")
-    CACHE_TTL = 86400
+    CACHE_TTL  = 86400
 
     def __init__(self):
         self.index: Dict[str, Dict] = {}
@@ -230,20 +231,11 @@ class ParcelLookup:
         except Exception as e:
             log.warning(f"Cache load failed: {e}")
 
-    def _save_cache(self):
-        self.CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with self.CACHE_FILE.open("w") as f:
-            json.dump(self.index, f)
-        log.info(f"Saved {len(self.index)} parcels to cache")
-
     def load(self):
         if self._loaded:
             return
         if self._is_cache_fresh():
             self._load_cache()
-            if self._loaded:
-                return
-        log.info("Building parcel index (no valid cache)...")
         self._loaded = True
 
     def _index_record(self, rec: Dict):
@@ -260,22 +252,22 @@ class ParcelLookup:
         return {}
 
 # ---------------------------------------------------------------------------
-# GSCCCA Scraper
+# GSCCCA Scraper with Login
 # ---------------------------------------------------------------------------
 
 class GSCCCAScraper:
-    """Scrapes the Georgia Superior Court Clerks' Cooperative Authority portal."""
 
     def __init__(self, start_date: datetime, end_date: datetime, counties: List[Tuple[str, int]]):
         self.start_date = start_date
         self.end_date   = end_date
         self.counties   = counties
         self.records: List[Dict] = []
+        self._logged_in = False
 
     async def run(self) -> List[Dict]:
         if not HAS_PLAYWRIGHT:
             log.warning("Playwright not available — using HTTP fallback")
-            return self._http_fallback()
+            return []
 
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(
@@ -290,8 +282,10 @@ class GSCCCAScraper:
             page.set_default_timeout(60_000)
 
             try:
-                await self._accept_disclaimer(page)
+                # Step 1: Login
+                await self._login(page)
 
+                # Step 2: Scrape each county × doc type
                 for county_name, county_id in self.counties:
                     log.info(f"Scraping {county_name} county (id={county_id})...")
                     for doc_code, (cat, cat_label) in DOC_TYPES.items():
@@ -305,32 +299,96 @@ class GSCCCAScraper:
                         except Exception as e:
                             log.error(f"  {county_name}/{doc_code} failed: {e}")
                             continue
-
             finally:
                 await browser.close()
 
         log.info(f"Total raw records: {len(self.records)}")
         return self.records
 
-    async def _accept_disclaimer(self, page: Page):
-        """Load GSCCCA and dismiss the disclaimer modal if present."""
-        await page.goto(GSCCCA_SEARCH_URL, wait_until="networkidle", timeout=60_000)
+    async def _login(self, page: Page):
+        """Log into GSCCCA with credentials from env vars."""
+        if not GSCCCA_USERNAME or not GSCCCA_PASSWORD:
+            log.warning("GSCCCA_USERNAME / GSCCCA_PASSWORD not set — proceeding without login (may get no results)")
+            await self._dismiss_modals(page)
+            return
+
+        log.info(f"Logging into GSCCCA as {GSCCCA_USERNAME}...")
+        await page.goto(GSCCCA_LOGIN_URL, wait_until="networkidle", timeout=60_000)
+        await page.wait_for_timeout(1000)
+
+        # Fill username
+        for sel in [
+            '#txtUserName', '#UserName', 'input[name="txtUserName"]',
+            'input[type="text"]', 'input[name*="user" i]', 'input[id*="user" i]',
+        ]:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                await el.triple_click()
+                await el.fill(GSCCCA_USERNAME)
+                log.info(f"  Filled username field: {sel}")
+                break
+
+        # Fill password
+        for sel in [
+            '#txtPassword', '#Password', 'input[name="txtPassword"]',
+            'input[type="password"]', 'input[name*="pass" i]', 'input[id*="pass" i]',
+        ]:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                await el.triple_click()
+                await el.fill(GSCCCA_PASSWORD)
+                log.info(f"  Filled password field: {sel}")
+                break
+
+        # Submit login form
+        for sel in [
+            '#btnLogin', '#LoginButton', 'input[value="Login"]',
+            'button[type="submit"]', 'input[type="submit"]',
+            'button:has-text("Login")', 'button:has-text("Sign In")',
+        ]:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                await el.click()
+                log.info(f"  Clicked login button: {sel}")
+                break
+
+        await page.wait_for_load_state("networkidle", timeout=30_000)
         await page.wait_for_timeout(1500)
 
-        # Common disclaimer selectors
+        # Verify login success
+        current_url = page.url
+        page_text = await page.inner_text("body")
+
+        if any(fail in page_text.lower() for fail in ["invalid", "incorrect", "failed", "error", "wrong password"]):
+            raise RuntimeError(f"GSCCCA login failed — check GSCCCA_USERNAME and GSCCCA_PASSWORD secrets")
+
+        if "login" in current_url.lower() and "logout" not in page_text.lower():
+            log.warning("Still on login page — may not be authenticated. Continuing anyway...")
+        else:
+            log.info("GSCCCA login successful!")
+            self._logged_in = True
+
+        # Dismiss any post-login modals / terms
+        await self._dismiss_modals(page)
+
+    async def _dismiss_modals(self, page: Page):
+        """Dismiss GSCCCA disclaimer / terms overlay."""
+        await page.wait_for_timeout(800)
         for sel in [
             'input[value="I Agree"]',
             'button:has-text("I Agree")',
             'a:has-text("I Agree")',
             '#btnAgree',
             '.disclaimer-agree',
+            'input[value="Accept"]',
+            'button:has-text("Accept")',
         ]:
             try:
                 el = await page.query_selector(sel)
                 if el and await el.is_visible():
                     await el.click()
                     await page.wait_for_load_state("networkidle", timeout=15_000)
-                    log.info("Dismissed GSCCCA disclaimer")
+                    log.info(f"Dismissed modal: {sel}")
                     return
             except Exception:
                 continue
@@ -345,13 +403,16 @@ class GSCCCAScraper:
         cat_label: str,
     ) -> List[Dict]:
         records = []
-        date_fmt = "%m/%d/%Y"
+        date_fmt  = "%m/%d/%Y"
         start_str = self.start_date.strftime(date_fmt)
         end_str   = self.end_date.strftime(date_fmt)
 
         # Navigate to search page
         await page.goto(GSCCCA_SEARCH_URL, wait_until="domcontentloaded", timeout=45_000)
         await page.wait_for_timeout(800)
+
+        # Dismiss any modal that re-appears
+        await self._dismiss_modals(page)
 
         # Select county
         county_sel = await page.query_selector(
@@ -371,7 +432,6 @@ class GSCCCAScraper:
                 try:
                     await instr_sel.select_option(label=instrument_label)
                 except Exception:
-                    # Try partial match
                     opts = await instr_sel.query_selector_all("option")
                     for opt in opts:
                         text = (await opt.text_content() or "").upper()
@@ -382,14 +442,14 @@ class GSCCCAScraper:
                 await page.wait_for_timeout(300)
 
         # Fill date range
-        for sel in ['#cphMain_txtFromDate', 'input[name*="From"]', 'input[id*="From"]', 'input[placeholder*="From"]']:
+        for sel in ['#cphMain_txtFromDate', 'input[name*="From"]', 'input[id*="From"]']:
             el = await page.query_selector(sel)
             if el:
                 await el.triple_click()
                 await el.fill(start_str)
                 break
 
-        for sel in ['#cphMain_txtToDate', 'input[name*="To"]', 'input[id*="To"]', 'input[placeholder*="To"]']:
+        for sel in ['#cphMain_txtToDate', 'input[name*="To"]', 'input[id*="To"]']:
             el = await page.query_selector(sel)
             if el:
                 await el.triple_click()
@@ -410,49 +470,33 @@ class GSCCCAScraper:
         page_num = 0
         while True:
             page_num += 1
-            content = await page.content()
-            soup = BeautifulSoup(content, "lxml")
+            content  = await page.content()
+            soup     = BeautifulSoup(content, "lxml")
             new_recs = self._parse_gsccca_results(soup, county_name, doc_code, cat, cat_label)
             records.extend(new_recs)
 
-            # Check for next page
+            # Next page via __doPostBack
             next_link = None
-            for candidate in soup.find_all("a"):
-                txt = candidate.get_text(strip=True)
+            for a in soup.find_all("a"):
+                txt = a.get_text(strip=True)
                 if txt in (">", "Next", ">>") or (txt.isdigit() and int(txt) == page_num + 1):
-                    next_link = candidate
+                    next_link = a
                     break
 
             if not next_link or page_num >= 30:
                 break
 
-            # Use __doPostBack for GridView pagination
-            onclick = next_link.get("href", "")
-            if "__doPostBack" in onclick:
-                # Extract event target
-                m = re.search(r"__doPostBack\('([^']+)','([^']*)'\)", onclick)
-                if m:
-                    try:
-                        await page.evaluate(
-                            f"__doPostBack('{m.group(1)}','{m.group(2)}')"
-                        )
-                        await page.wait_for_load_state("networkidle", timeout=20_000)
-                        await page.wait_for_timeout(800)
-                        continue
-                    except Exception:
-                        pass
-
-            # Standard click
-            try:
-                link_el = await page.query_selector(f'a:has-text("{next_link.get_text(strip=True)}")')
-                if link_el:
-                    await link_el.click()
+            href = next_link.get("href", "")
+            m = re.search(r"__doPostBack\('([^']+)','([^']*)'\)", href)
+            if m:
+                try:
+                    await page.evaluate(f"__doPostBack('{m.group(1)}','{m.group(2)}')")
                     await page.wait_for_load_state("networkidle", timeout=20_000)
                     await page.wait_for_timeout(800)
-                else:
-                    break
-            except Exception:
-                break
+                    continue
+                except Exception:
+                    pass
+            break
 
         return records
 
@@ -461,7 +505,6 @@ class GSCCCAScraper:
     ) -> List[Dict]:
         records = []
 
-        # GSCCCA renders results in a GridView table
         result_table = None
         for tbl in soup.find_all("table"):
             headers = [th.get_text(strip=True).lower() for th in tbl.find_all("th")]
@@ -497,8 +540,8 @@ class GSCCCAScraper:
                 def cell(idx):
                     return cells[idx].get_text(strip=True) if 0 <= idx < len(cells) else ""
 
-                book = cell(book_idx)
-                pg   = cell(page_idx)
+                book    = cell(book_idx)
+                pg      = cell(page_idx)
                 doc_num = f"{book}/{pg}" if book and pg else book or pg or ""
 
                 filed_raw = cell(date_idx)
@@ -517,7 +560,6 @@ class GSCCCAScraper:
                 amount  = parse_amount(cell(amount_idx))
                 legal   = cell(desc_idx)
 
-                # Build clerk URL
                 clerk_url = ""
                 for c in cells:
                     a = c.find("a", href=True)
@@ -556,23 +598,6 @@ class GSCCCAScraper:
 
         return records
 
-    def _http_fallback(self) -> List[Dict]:
-        """HTTP-only fallback when Playwright is unavailable."""
-        records = []
-        log.info("HTTP fallback: scraping GSCCCA without browser")
-        session = requests.Session()
-        session.headers.update({"User-Agent": "Mozilla/5.0 (compatible; GAScraper/2.0)"})
-        r = safe_get(GSCCCA_SEARCH_URL, session)
-        if not r:
-            return records
-        soup = BeautifulSoup(r.text, "lxml")
-        # Parse whatever is visible on the landing page
-        for doc_code, (cat, cat_label) in DOC_TYPES.items():
-            for county_name, _ in self.counties:
-                recs = self._parse_gsccca_results(soup, county_name, doc_code, cat, cat_label)
-                records.extend(recs)
-        return records
-
 # ---------------------------------------------------------------------------
 # Lead Scorer
 # ---------------------------------------------------------------------------
@@ -583,29 +608,24 @@ class LeadScorer:
 
     def score(self, record: Dict) -> Tuple[int, List[str]]:
         flags = []
-        pts = 30
+        pts   = 30
 
-        cat      = record.get("cat", "")
-        doc_type = record.get("doc_type", "")
-        amount   = float(record.get("amount") or 0)
-        filed_str= record.get("filed") or ""
-        owner    = record.get("owner") or ""
-        prop_addr= record.get("prop_address") or ""
+        cat       = record.get("cat", "")
+        doc_type  = record.get("doc_type", "")
+        amount    = float(record.get("amount") or 0)
+        filed_str = record.get("filed") or ""
+        owner     = record.get("owner") or ""
+        prop_addr = record.get("prop_address") or ""
 
-        if cat == "LP":
-            flags.append("Lis pendens"); pts += 10
-        if cat == "FC":
-            flags.append("Pre-foreclosure"); pts += 10
-        if cat == "JUD":
-            flags.append("Judgment lien"); pts += 10
+        if cat == "LP":    flags.append("Lis pendens");       pts += 10
+        if cat == "FC":    flags.append("Pre-foreclosure");   pts += 10
+        if cat == "JUD":   flags.append("Judgment lien");     pts += 10
         if cat == "TAX" or "TAX" in doc_type.upper():
-            flags.append("Tax lien"); pts += 10
-        if doc_type == "LNMECH":
-            flags.append("Mechanic lien"); pts += 10
-        if cat == "PRO":
-            flags.append("Probate / estate"); pts += 10
+                           flags.append("Tax lien");          pts += 10
+        if doc_type == "LNMECH": flags.append("Mechanic lien"); pts += 10
+        if cat == "PRO":   flags.append("Probate / estate");  pts += 10
         if re.search(r"\bLLC\b|\bCORP\b|\bINC\b|\bL\.P\.|\bL\.L\.C", owner, re.I):
-            flags.append("LLC / corp owner"); pts += 10
+                           flags.append("LLC / corp owner");  pts += 10
 
         if cat == "LP" and any("foreclosure" in f.lower() for f in flags):
             pts += 20
@@ -625,23 +645,22 @@ class LeadScorer:
         return min(pts, 100), flags
 
 # ---------------------------------------------------------------------------
-# Main Pipeline
+# Pipeline
 # ---------------------------------------------------------------------------
 
 def filter_by_date(records, start, end):
     out = []
     for r in records:
         try:
-            filed_dt = datetime.strptime(r.get("filed", "")[:10], "%Y-%m-%d")
-            if start <= filed_dt <= end:
+            dt = datetime.strptime(r.get("filed","")[:10], "%Y-%m-%d")
+            if start <= dt <= end:
                 out.append(r)
         except Exception:
             out.append(r)
     return out
 
 def deduplicate(records):
-    seen = set()
-    out = []
+    seen, out = set(), []
     for r in records:
         key = (r.get("doc_num",""), r.get("doc_type",""), r.get("owner",""), r.get("county",""))
         if key not in seen:
@@ -653,10 +672,10 @@ def enrich_with_parcels(records, parcel):
     for r in records:
         p = parcel.lookup(r.get("owner",""))
         if p:
-            for field in ["prop_address","prop_city","prop_state","prop_zip",
-                          "mail_address","mail_city","mail_state","mail_zip"]:
-                if not r.get(field) and p.get(field):
-                    r[field] = p[field]
+            for f in ["prop_address","prop_city","prop_state","prop_zip",
+                      "mail_address","mail_city","mail_state","mail_zip"]:
+                if not r.get(f) and p.get(f):
+                    r[f] = p[f]
             enriched += 1
     log.info(f"Enriched {enriched}/{len(records)} records with parcel data")
     return records
@@ -664,20 +683,20 @@ def enrich_with_parcels(records, parcel):
 def score_records(records):
     scorer = LeadScorer()
     for r in records:
-        score, flags = scorer.score(r)
-        r["score"] = score; r["flags"] = flags
+        s, fl = scorer.score(r)
+        r["score"] = s; r["flags"] = fl
     records.sort(key=lambda r: r.get("score",0), reverse=True)
     return records
 
 def save_outputs(records, start, end):
     payload = {
-        "fetched_at":  datetime.utcnow().isoformat() + "Z",
-        "source":      "GSCCCA - Georgia Superior Court Clerks Cooperative Authority",
-        "date_range":  {"start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d")},
-        "counties":    [c[0] for c in ACTIVE_COUNTIES],
-        "total":       len(records),
+        "fetched_at":   datetime.utcnow().isoformat() + "Z",
+        "source":       "GSCCCA - Georgia Superior Court Clerks Cooperative Authority",
+        "date_range":   {"start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d")},
+        "counties":     [c[0] for c in ACTIVE_COUNTIES],
+        "total":        len(records),
         "with_address": sum(1 for r in records if r.get("prop_address")),
-        "records":     records,
+        "records":      records,
     }
     for path in OUTPUT_PATHS:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -695,8 +714,7 @@ def export_ghl_csv(records, out_path=Path("data/ghl_export.csv")):
     rows = []
     for r in records:
         owner = (r.get("owner") or "").upper()
-        parts = re.split(r"[,\s]+", owner)
-        parts = [p for p in parts if p]
+        parts = [p for p in re.split(r"[,\s]+", owner) if p]
         last  = parts[0] if parts else ""
         first = " ".join(parts[1:]) if len(parts) > 1 else ""
         rows.append({
@@ -732,9 +750,13 @@ async def main():
     log.info(f"Date range: {start_date.date()} to {end_date.date()}")
     log.info(f"Counties:   {[c[0] for c in ACTIVE_COUNTIES]}")
 
+    if not GSCCCA_USERNAME:
+        log.warning("⚠ GSCCCA_USERNAME not set — add GitHub Secret GSCCCA_USERNAME")
+    if not GSCCCA_PASSWORD:
+        log.warning("⚠ GSCCCA_PASSWORD not set — add GitHub Secret GSCCCA_PASSWORD")
+
     scraper = GSCCCAScraper(start_date, end_date, ACTIVE_COUNTIES)
     records = await scraper.run()
-    log.info(f"Raw records: {len(records)}")
 
     records = filter_by_date(records, start_date, end_date)
     records = deduplicate(records)
