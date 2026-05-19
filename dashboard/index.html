@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Fulton County Motivated Seller Leads</title>
+  <title>Georgia Motivated Seller Leads</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }
@@ -11,13 +11,15 @@
     .header h1 { font-size: 1.5rem; font-weight: 700; color: #f7fafc; }
     .header h1 span { color: #f6ad55; }
     .badge { background: #2d3748; border: 1px solid #4a5568; border-radius: 20px; padding: 0.3rem 0.8rem; font-size: 0.75rem; color: #a0aec0; }
-    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1rem; padding: 1.5rem 2rem; background: #0d1117; border-bottom: 1px solid #2d3748; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 1rem; padding: 1.5rem 2rem; background: #0d1117; border-bottom: 1px solid #2d3748; }
     .stat-card { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 8px; padding: 1rem; text-align: center; }
     .stat-card .value { font-size: 2rem; font-weight: 700; color: #f6ad55; }
     .stat-card .label { font-size: 0.75rem; color: #718096; margin-top: 0.25rem; text-transform: uppercase; letter-spacing: 0.05em; }
     .controls { padding: 1rem 2rem; display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; background: #0d1117; border-bottom: 1px solid #2d3748; }
     .search-box { flex: 1; min-width: 200px; background: #1a1f2e; border: 1px solid #2d3748; border-radius: 6px; padding: 0.5rem 1rem; color: #e2e8f0; font-size: 0.9rem; }
     .search-box:focus { outline: none; border-color: #f6ad55; }
+    .county-select { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 6px; padding: 0.5rem 0.75rem; color: #e2e8f0; font-size: 0.82rem; cursor: pointer; min-width: 160px; }
+    .county-select:focus { outline: none; border-color: #f6ad55; }
     .filter-btn { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 6px; padding: 0.5rem 1rem; color: #a0aec0; font-size: 0.8rem; cursor: pointer; transition: all 0.2s; }
     .filter-btn:hover, .filter-btn.active { background: #f6ad55; color: #1a1f2e; border-color: #f6ad55; font-weight: 600; }
     .export-btn { background: #276749; border: 1px solid #2f855a; border-radius: 6px; padding: 0.5rem 1rem; color: #68d391; font-size: 0.8rem; cursor: pointer; }
@@ -42,6 +44,7 @@
     .flag-tag.jud { background: #1a365d; color: #90cdf4; }
     .flag-tag.mech { background: #1c4532; color: #9ae6b4; }
     .flag-tag.new { background: #1a365d; color: #63b3ed; }
+    .county-tag { display: inline-block; background: #1a365d; border-radius: 3px; padding: 0.1rem 0.35rem; font-size: 0.68rem; color: #90cdf4; white-space: nowrap; font-weight: 600; }
     .doc-link { color: #63b3ed; text-decoration: none; font-size: 0.75rem; }
     .doc-link:hover { color: #90cdf4; text-decoration: underline; }
     .amount-cell { white-space: nowrap; color: #68d391; font-weight: 600; }
@@ -63,7 +66,7 @@
 </head>
 <body>
   <div class="header">
-    <h1>Fulton County <span>Motivated Seller Leads</span></h1>
+    <h1>Georgia <span>Motivated Seller Leads</span></h1>
     <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
       <span class="badge" id="recordCount">0 records</span>
       <span class="badge fetched-at" id="fetchedAt">Not yet fetched</span>
@@ -72,6 +75,7 @@
 
   <div class="stats">
     <div class="stat-card"><div class="value" id="statTotal">0</div><div class="label">Total Leads</div></div>
+    <div class="stat-card"><div class="value" id="statCounties">0</div><div class="label">Counties</div></div>
     <div class="stat-card"><div class="value" id="statWithAddr">0</div><div class="label">With Address</div></div>
     <div class="stat-card"><div class="value" id="statHighScore">0</div><div class="label">Score ≥ 70</div></div>
     <div class="stat-card"><div class="value" id="statLP">0</div><div class="label">Lis Pendens</div></div>
@@ -80,8 +84,11 @@
   </div>
 
   <div class="controls">
-    <input type="text" class="search-box" id="searchBox" placeholder="Search owner, address, doc number...">
-    <button class="filter-btn active" data-filter="all">All</button>
+    <input type="text" class="search-box" id="searchBox" placeholder="Search owner, address, doc number, county...">
+    <select class="county-select" id="countySelect">
+      <option value="all">All Counties</option>
+    </select>
+    <button class="filter-btn active" data-filter="all">All Types</button>
     <button class="filter-btn" data-filter="LP">Lis Pendens</button>
     <button class="filter-btn" data-filter="NOFC">Foreclosure</button>
     <button class="filter-btn" data-filter="TAX">Tax</button>
@@ -97,6 +104,7 @@
       <thead>
         <tr>
           <th data-col="score">Score</th>
+          <th data-col="county">County</th>
           <th data-col="filed">Filed</th>
           <th data-col="doc_type">Type</th>
           <th data-col="owner">Owner</th>
@@ -119,7 +127,7 @@
 
 <script>
 const PAGE_SIZE = 50;
-let allRecords = [], filtered = [], currentPage = 1, sortCol = 'score', sortDir = 'desc', activeFilter = 'all', searchQuery = '';
+let allRecords = [], filtered = [], currentPage = 1, sortCol = 'score', sortDir = 'desc', activeFilter = 'all', searchQuery = '', activeCounty = 'all';
 
 function formatAmount(v) {
   if (!v || v === 0) return '';
@@ -154,8 +162,10 @@ function renderRow(r) {
   const maddr = [r.mail_address, r.mail_city, r.mail_state, r.mail_zip].filter(Boolean).join(', ');
   const flags = (r.flags || []).map(f => `<span class="flag-tag ${flagClass(f)}">${f}</span>`).join('');
   const docLink = r.clerk_url ? `<a class="doc-link" href="${r.clerk_url}" target="_blank">${r.doc_num || ''} ↗</a>` : (r.doc_num || '');
+  const county = r.county ? `<span class="county-tag">${r.county}</span>` : '';
   return `<tr>
     <td><span class="score-badge ${scoreClass(r.score || 0)}">${r.score || 0}</span></td>
+    <td>${county}</td>
     <td>${formatDate(r.filed)}</td>
     <td><span class="type-badge">${r.doc_type || ''}</span></td>
     <td>${r.owner || ''}</td>
@@ -167,10 +177,22 @@ function renderRow(r) {
   </tr>`;
 }
 
+function populateCountyDropdown(records) {
+  const counties = [...new Set(records.map(r => r.county).filter(Boolean))].sort();
+  const sel = document.getElementById('countySelect');
+  sel.innerHTML = '<option value="all">All Counties</option>';
+  counties.forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c;
+    opt.textContent = c + ' County';
+    sel.appendChild(opt);
+  });
+}
+
 function applyFilters() {
   const q = searchQuery.toLowerCase();
   filtered = allRecords.filter(r => {
-    const matchSearch = !q || [r.owner, r.prop_address, r.doc_num, r.grantee, r.mail_address].some(v => v && v.toLowerCase().includes(q));
+    const matchSearch = !q || [r.owner, r.prop_address, r.doc_num, r.grantee, r.mail_address, r.county].some(v => v && v.toLowerCase().includes(q));
     let matchFilter = true;
     if (activeFilter === 'LP') matchFilter = r.cat === 'LP';
     else if (activeFilter === 'NOFC') matchFilter = r.cat === 'FC';
@@ -179,7 +201,8 @@ function applyFilters() {
     else if (activeFilter === 'LN') matchFilter = r.cat === 'LIEN';
     else if (activeFilter === 'PRO') matchFilter = r.cat === 'PRO';
     else if (activeFilter === 'HIGH') matchFilter = (r.score || 0) >= 70;
-    return matchSearch && matchFilter;
+    const matchCounty = activeCounty === 'all' || r.county === activeCounty;
+    return matchSearch && matchFilter && matchCounty;
   });
   filtered.sort((a, b) => {
     let av = a[sortCol] ?? '', bv = b[sortCol] ?? '';
@@ -226,7 +249,9 @@ function renderPagination() {
 function goPage(p) { currentPage = p; renderTable(); window.scrollTo(0,0); }
 
 function updateStats(records) {
+  const counties = new Set(records.map(r => r.county).filter(Boolean));
   document.getElementById('statTotal').textContent = records.length;
+  document.getElementById('statCounties').textContent = counties.size;
   document.getElementById('statWithAddr').textContent = records.filter(r => r.prop_address).length;
   document.getElementById('statHighScore').textContent = records.filter(r => (r.score||0) >= 70).length;
   document.getElementById('statLP').textContent = records.filter(r => r.cat === 'LP').length;
@@ -236,12 +261,12 @@ function updateStats(records) {
 }
 
 function exportGHL() {
-  const cols = ['First Name','Last Name','Mailing Address','Mailing City','Mailing State','Mailing Zip','Property Address','Property City','Property State','Property Zip','Lead Type','Document Type','Date Filed','Document Number','Amount/Debt Owed','Seller Score','Motivated Seller Flags','Source','Public Records URL'];
+  const cols = ['First Name','Last Name','County','Mailing Address','Mailing City','Mailing State','Mailing Zip','Property Address','Property City','Property State','Property Zip','Lead Type','Document Type','Date Filed','Document Number','Amount/Debt Owed','Seller Score','Motivated Seller Flags','Source','Public Records URL'];
   const rows = filtered.map(r => {
     const parts = (r.owner || '').split(/[,\s]+/);
     const first = parts.length > 1 ? parts.slice(1).join(' ') : '';
     const last = parts[0] || '';
-    return [first, last, r.mail_address||'', r.mail_city||'', r.mail_state||'', r.mail_zip||'', r.prop_address||'', r.prop_city||'', r.prop_state||'', r.prop_zip||'', r.cat_label||'', r.doc_type||'', r.filed||'', r.doc_num||'', r.amount||'', r.score||'', (r.flags||[]).join('; '), r.source||'Fulton County Clerk', r.clerk_url||''].map(v => '"'+String(v).replace(/"/g,'""')+'"').join(',');
+    return [first, last, r.county||'', r.mail_address||'', r.mail_city||'', r.mail_state||'', r.mail_zip||'', r.prop_address||'', r.prop_city||'', r.prop_state||'', r.prop_zip||'', r.cat_label||'', r.doc_type||'', r.filed||'', r.doc_num||'', r.amount||'', r.score||'', (r.flags||[]).join('; '), r.source||'GSCCCA', r.clerk_url||''].map(v => '"'+String(v).replace(/"/g,'""')+'"').join(',');
   });
   const csv = [cols.join(','), ...rows].join('\n');
   const a = document.createElement('a');
@@ -258,6 +283,7 @@ async function loadData() {
     if (data.fetched_at) {
       document.getElementById('fetchedAt').textContent = 'Updated: ' + new Date(data.fetched_at).toLocaleString();
     }
+    populateCountyDropdown(allRecords);
     updateStats(allRecords);
     applyFilters();
   } catch(e) {
@@ -267,6 +293,7 @@ async function loadData() {
 }
 
 document.getElementById('searchBox').addEventListener('input', e => { searchQuery = e.target.value; applyFilters(); });
+document.getElementById('countySelect').addEventListener('change', e => { activeCounty = e.target.value; applyFilters(); });
 document.querySelectorAll('.filter-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
