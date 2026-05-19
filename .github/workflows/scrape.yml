@@ -17,7 +17,7 @@ on:
         required: false
         default: "FULTON,CLAYTON,HOUSTON,COBB,GWINNETT,DOUGLAS"
       headless:
-        description: "Run browser headless (true/false)"
+        description: "Run browser headless (true/fase)"
         required: false
         default: "true"
 
@@ -51,7 +51,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 lxml dbfread playwright
+          pip install requests beautifulsoup4 lxml dbfread playwright cloudscraper
 
       - name: Install Playwright Chromium + system deps
         run: python -m playwright install --with-deps chromium
