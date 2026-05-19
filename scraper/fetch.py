@@ -96,6 +96,8 @@ ALL_GA_COUNTIES: Dict[str, str] = {
     "WHITE":"154","WHITFIELD":"155","WILCOX":"156","WILKES":"157",
     "WILKINSON":"158","WORTH":"159",
 }
+
+
 def _resolve_counties() -> "List[Tuple[str, str]]":
     raw = _COUNTIES_ENV.strip().upper()
     if raw in ("ALL", "*", ""):
@@ -166,8 +168,9 @@ FLAG_NEW = "New this week"
 LOG_FMT = "%(asctime)s [%(levelname)s] %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FMT, stream=sys.stdout)
 log = logging.getLogger("fulton-scraper")
+
+
 def retry(max_tries: int = MAX_RETRIES, delay: float = RETRY_DELAY, exc=(Exception,)):
-    """Decorator: retry up to max_tries times on the given exceptions."""
     def deco(fn):
         @wraps(fn)
         async def wrapper(*args, **kwargs):
@@ -177,14 +180,11 @@ def retry(max_tries: int = MAX_RETRIES, delay: float = RETRY_DELAY, exc=(Excepti
                     return await fn(*args, **kwargs)
                 except exc as e:
                     last_exc = e
-                    log.warning(
-                        "Attempt %d/%d failed for %s: %s",
-                        attempt, max_tries, fn.__name__, e,
-                    )
+                    log.warning("Attempt %d/%d failed for %s: %s", attempt, max_tries, fn.__name__, e)
                     if attempt < max_tries:
                         await asyncio.sleep(delay * attempt)
             log.error("All %d attempts failed for %s", max_tries, fn.__name__)
-            raise last_exc  # type: ignore[misc]
+            raise last_exc
         return wrapper
     return deco
 
@@ -199,13 +199,10 @@ def sync_retry(max_tries: int = MAX_RETRIES, delay: float = RETRY_DELAY, exc=(Ex
                     return fn(*args, **kwargs)
                 except exc as e:
                     last_exc = e
-                    log.warning(
-                        "Attempt %d/%d failed for %s: %s",
-                        attempt, max_tries, fn.__name__, e,
-                    )
+                    log.warning("Attempt %d/%d failed for %s: %s", attempt, max_tries, fn.__name__, e)
                     if attempt < max_tries:
                         time.sleep(delay * attempt)
-            raise last_exc  # type: ignore[misc]
+            raise last_exc
         return wrapper
     return deco
 
@@ -248,17 +245,9 @@ def name_variants(full_name: str) -> List[str]:
             variants.add(f"{words[-1]} {' '.join(words[:-1])}")
             variants.add(f"{words[-1]}, {' '.join(words[:-1])}")
     return list(variants)
-class ParcelLookup:
-    PARCEL_DOWNLOAD_CANDIDATES = [
-        "https://opendata.fultoncountyga.gov/datasets/fulton-county-parcels/explore",
-        "https://fultoncountypropertyappraiser.org/downloads/",
-        (
-            "https://services.arcgis.com/gXbFIzHRtHGMRJgj/arcgis/rest/services/"
-            "Fulton_Parcels/FeatureServer/0/query?"
-            "where=1%3D1&outFields=*&f=json&resultRecordCount=2000&resultOffset=0"
-        ),
-    ]
 
+
+class ParcelLookup:
     def __init__(self) -> None:
         self._index: Dict[str, Dict[str, str]] = {}
         self._loaded = False
@@ -266,9 +255,7 @@ class ParcelLookup:
     @sync_retry(max_tries=MAX_RETRIES, exc=(Exception,))
     def _fetch_property_appraiser_page(self) -> Optional[bytes]:
         session = requests.Session()
-        session.headers["User-Agent"] = (
-            "Mozilla/5.0 (compatible; PropstorBot/1.0; +https://propstor.com)"
-        )
+        session.headers["User-Agent"] = "Mozilla/5.0 (compatible; PropstorBot/1.0; +https://propstor.com)"
         download_page_urls = [
             "https://fultoncountypropertyappraiser.org/downloads/",
             "https://fultoncountypropertyappraiser.org/data/",
@@ -293,7 +280,6 @@ class ParcelLookup:
             href: str = a["href"]
             if any(href.lower().endswith(ext) for ext in (".zip", ".dbf", ".csv")):
                 full_url = urljoin(page_url, href)
-                log.info("Found direct parcel download: %s", full_url)
                 r = session.get(full_url, timeout=120, stream=True)
                 if r.ok:
                     return r.content
@@ -306,50 +292,28 @@ class ParcelLookup:
             action = form.get("action", page_url)
             if not action.startswith("http"):
                 action = urljoin(page_url, action)
-            for btn in soup.find_all(
-                ["input", "button", "a"],
-                string=re.compile(r"(download|parcel|bulk|data|export)", re.I),
-            ):
+            for btn in soup.find_all(["input", "button", "a"], string=re.compile(r"(download|parcel|bulk|data|export)", re.I)):
                 event_target = btn.get("name", btn.get("id", ""))
                 if not event_target:
                     continue
-                payload = {
-                    "__EVENTTARGET": event_target,
-                    "__EVENTARGUMENT": "",
-                    "__VIEWSTATE": viewstate,
-                    "__EVENTVALIDATION": eventval,
-                }
+                payload = {"__EVENTTARGET": event_target, "__EVENTARGUMENT": "", "__VIEWSTATE": viewstate, "__EVENTVALIDATION": eventval}
                 try:
                     r = session.post(action, data=payload, timeout=120, stream=True)
                     ct = r.headers.get("Content-Type", "")
                     if r.ok and ("zip" in ct or "octet" in ct or "dbf" in ct):
-                        log.info("DoPostBack download succeeded for target %s", event_target)
                         return r.content
                 except Exception as exc:
                     log.debug("DoPostBack %s failed: %s", event_target, exc)
-        log.warning("No downloadable parcel file found via property appraiser page")
         return None
+
     def _fetch_arcgis_paginated(self) -> List[Dict]:
-        base = (
-            "https://services.arcgis.com/gXbFIzHRtHGMRJgj/arcgis/rest/services/"
-            "Fulton_Parcels/FeatureServer/0/query"
-        )
+        base = "https://services.arcgis.com/gXbFIzHRtHGMRJgj/arcgis/rest/services/Fulton_Parcels/FeatureServer/0/query"
         records: List[Dict] = []
         offset = 0
         page_size = 2000
         session = requests.Session()
         while True:
-            params = {
-                "where": "1=1",
-                "outFields": (
-                    "OWNER,OWN1,SITE_ADDR,SITEADDR,SITE_CITY,SITE_ZIP,"
-                    "ADDR_1,MAILADR1,CITY,MAILCITY,STATE,ZIP,MAILZIP,PARID"
-                ),
-                "f": "json",
-                "resultRecordCount": page_size,
-                "resultOffset": offset,
-                "returnGeometry": "false",
-            }
+            params = {"where": "1=1", "outFields": "OWNER,OWN1,SITE_ADDR,SITEADDR,SITE_CITY,SITE_ZIP,ADDR_1,MAILADR1,CITY,MAILCITY,STATE,ZIP,MAILZIP,PARID", "f": "json", "resultRecordCount": page_size, "resultOffset": offset, "returnGeometry": "false"}
             try:
                 r = session.get(base, params=params, timeout=60)
                 data = r.json()
@@ -357,7 +321,6 @@ class ParcelLookup:
                 if not features:
                     break
                 records.extend(f["attributes"] for f in features)
-                log.info("ArcGIS parcel page offset=%d → %d records", offset, len(features))
                 if len(features) < page_size:
                     break
                 offset += page_size
@@ -367,11 +330,7 @@ class ParcelLookup:
         return records
 
     def _fetch_open_data_csv(self) -> Optional[List[Dict]]:
-        candidates = [
-            "https://opendata.fultoncountyga.gov/api/download/v1/items/fulton-county-parcels/csv",
-            "https://opendata.fultoncountyga.gov/datasets/fulton-county-parcels_0.csv",
-            "https://opendata.fultoncountyga.gov/datasets/Fulton_Parcels.csv",
-        ]
+        candidates = ["https://opendata.fultoncountyga.gov/api/download/v1/items/fulton-county-parcels/csv", "https://opendata.fultoncountyga.gov/datasets/fulton-county-parcels_0.csv"]
         session = requests.Session()
         for url in candidates:
             try:
@@ -381,7 +340,6 @@ class ParcelLookup:
                     reader = csv.DictReader(lines_data)
                     rows = list(reader)
                     if rows:
-                        log.info("Open-data CSV returned %d parcel rows", len(rows))
                         return rows
             except Exception as exc:
                 log.debug("Open-data CSV %s: %s", url, exc)
@@ -391,10 +349,7 @@ class ParcelLookup:
         added = 0
         for row in rows:
             try:
-                owner = clean_str(
-                    row.get("OWNER") or row.get("OWN1") or row.get("OWNERNAME")
-                    or row.get("OWNER_NAME") or ""
-                )
+                owner = clean_str(row.get("OWNER") or row.get("OWN1") or row.get("OWNERNAME") or row.get("OWNER_NAME") or "")
                 if not owner:
                     continue
                 prop_addr = clean_str(row.get("SITE_ADDR") or row.get("SITEADDR") or row.get("SITE_ADDRESS") or "")
@@ -405,12 +360,7 @@ class ParcelLookup:
                 mail_city = clean_str(row.get("CITY") or row.get("MAILCITY") or row.get("MAIL_CITY") or "")
                 mail_state = clean_str(row.get("STATE") or row.get("MAILSTATE") or "GA")
                 mail_zip = clean_str(row.get("ZIP") or row.get("MAILZIP") or row.get("MAIL_ZIP") or "")
-                entry = {
-                    "prop_address": prop_addr, "prop_city": prop_city,
-                    "prop_state": prop_state if prop_state else "GA", "prop_zip": prop_zip,
-                    "mail_address": mail_addr, "mail_city": mail_city,
-                    "mail_state": mail_state if mail_state else "GA", "mail_zip": mail_zip,
-                }
+                entry = {"prop_address": prop_addr, "prop_city": prop_city, "prop_state": prop_state if prop_state else "GA", "prop_zip": prop_zip, "mail_address": mail_addr, "mail_city": mail_city, "mail_state": mail_state if mail_state else "GA", "mail_zip": mail_zip}
                 for variant in name_variants(owner):
                     key = variant.upper().strip()
                     if key and key not in self._index:
@@ -418,7 +368,8 @@ class ParcelLookup:
                         added += 1
             except Exception:
                 pass
-        log.info("Parcel index built: %d owner entries, %d name keys", added, len(self._index))
+        log.info("Parcel index built: %d entries", added)
+
     def load(self) -> None:
         if self._loaded:
             return
@@ -426,7 +377,6 @@ class ParcelLookup:
         if cache_path.exists():
             age_hours = (time.time() - cache_path.stat().st_mtime) / 3600
             if age_hours < 24:
-                log.info("Using cached parcel index (%0.1f hours old)", age_hours)
                 try:
                     with open(cache_path) as f:
                         self._index = json.load(f)
@@ -475,14 +425,12 @@ class ParcelLookup:
                 with zipfile.ZipFile(BytesIO(data)) as zf:
                     for name in zf.namelist():
                         if name.lower().endswith(".dbf"):
-                            log.info("Parsing DBF inside ZIP: %s", name)
                             with tempfile.NamedTemporaryFile(suffix=".dbf", delete=False) as tmp:
                                 tmp.write(zf.read(name))
                                 tmp_path = tmp.name
                             try:
                                 table = DBF(tmp_path, encoding="latin-1", ignore_missing_memofile=True)
                                 rows = [dict(rec) for rec in table]
-                                log.info("DBF rows loaded: %d", len(rows))
                             finally:
                                 os.unlink(tmp_path)
                             break
@@ -490,7 +438,6 @@ class ParcelLookup:
                             with zf.open(name) as f:
                                 reader = csv.DictReader(line.decode("latin-1") for line in f)
                                 rows = list(reader)
-                                log.info("CSV-in-ZIP rows loaded: %d", len(rows))
                             break
             elif data[:3] in (b"\x03", b"\x83", b"\x8b"):
                 with tempfile.NamedTemporaryFile(suffix=".dbf", delete=False) as tmp:
@@ -499,7 +446,6 @@ class ParcelLookup:
                 try:
                     table = DBF(tmp_path, encoding="latin-1", ignore_missing_memofile=True)
                     rows = [dict(rec) for rec in table]
-                    log.info("Raw DBF rows loaded: %d", len(rows))
                 finally:
                     os.unlink(tmp_path)
         except Exception as exc:
@@ -511,7 +457,6 @@ class ParcelLookup:
             Path(PARCEL_CACHE_PATH).parent.mkdir(parents=True, exist_ok=True)
             with open(PARCEL_CACHE_PATH, "w") as f:
                 json.dump(self._index, f)
-            log.info("Parcel cache saved to %s", PARCEL_CACHE_PATH)
         except Exception as exc:
             log.warning("Parcel cache save failed: %s", exc)
 
@@ -521,24 +466,26 @@ class ParcelLookup:
             if key in self._index:
                 return self._index[key]
         return {}
+
+
 class ClerkScraper:
     SEARCH_URL = "https://search.gsccca.org/RealEstateIndex.aspx"
     GSCCCA_INSTRUMENT_MAP: Dict[str, List[str]] = {
         "LP": ["LP", "LIS PENDENS", "Lis Pendens"],
-        "NOFC": ["NOFC","NOTICE OF FORECLOSURE", "Notice of Foreclosure","NF", "NOTICEOFFORECLOS"],
-        "TAXDEED": ["TAXD","TAX DEED", "Tax Deed","TD", "TAXDEED"],
-        "JUD": ["JUD", "JUDGMENT", "Judgment","JUDG","J"],
-        "CCJ": ["CCJ", "CERTIFIED COPY JUDGMENT","Certified Copy Judgment","CJ"],
+        "NOFC": ["NOFC","NOTICE OF FORECLOSURE","Notice of Foreclosure","NF","NOTICEOFFORECLOS"],
+        "TAXDEED": ["TAXD","TAX DEED","Tax Deed","TD","TAXDEED"],
+        "JUD": ["JUD","JUDGMENT","Judgment","JUDG","J"],
+        "CCJ": ["CCJ","CERTIFIED COPY JUDGMENT","Certified Copy Judgment","CJ"],
         "DRJUD": ["DRJUD","DOMESTIC RELATIONS JUDGMENT","Domestic Relations Judgment","DR"],
         "LNCORPTX": ["LNCORPTX","CORP TAX LIEN","Corporate Tax Lien","FTL","STATE TAX LIEN","LNST"],
         "LNIRS": ["LNIRS","IRS LIEN","Federal Tax Lien","LNFED","FLN","FEDERAL TAX LIEN"],
         "LNFED": ["LNFED","FEDERAL LIEN","FEDERAL TAX LIEN","FTL"],
-        "LN": ["LN", "LIEN"],
-        "LNMECH": ["LNMECH","MATERIALMAN'S LIEN","MECHANIC'S LIEN","ML", "MATERIALMAN","Materialman"],
+        "LN": ["LN","LIEN"],
+        "LNMECH": ["LNMECH","MATERIALMAN'S LIEN","MECHANIC'S LIEN","ML","MATERIALMAN","Materialman"],
         "LNHOA": ["LNHOA","HOA LIEN","HOMEOWNERS ASSOC LIEN"],
         "MEDLN": ["MEDLN","MEDICAID LIEN","MED LIEN"],
-        "PRO": ["PRO", "PROBATE","Letters Testamentary","Letters of Administration","LT","LA"],
-        "NOC": ["NOC", "NOTICE OF COMMENCEMENT","Notice of Commencement"],
+        "PRO": ["PRO","PROBATE","Letters Testamentary","Letters of Administration","LT","LA"],
+        "NOC": ["NOC","NOTICE OF COMMENCEMENT","Notice of Commencement"],
         "RELLP": ["RELLP","RELEASE LIS PENDENS","Release Lis Pendens","RLP"],
     }
 
@@ -548,11 +495,7 @@ class ClerkScraper:
     async def _new_page(self) -> Tuple["BrowserContext", Page]:
         ctx = await self.browser.new_context(
             viewport={"width": 1400, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
         )
         ctx.set_default_timeout(PAGE_TIMEOUT)
         ctx.set_default_navigation_timeout(NAV_TIMEOUT)
@@ -564,8 +507,7 @@ class ClerkScraper:
         if not raw:
             return ""
         raw = clean_str(raw)
-        for fmt in ("%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%d", "%m/%d/%y",
-                    "%B %d, %Y", "%b %d, %Y", "%d/%m/%Y"):
+        for fmt in ("%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%d", "%m/%d/%y", "%B %d, %Y", "%b %d, %Y", "%d/%m/%Y"):
             try:
                 return datetime.strptime(raw[:20], fmt).strftime("%Y-%m-%d")
             except ValueError:
@@ -583,107 +525,149 @@ class ClerkScraper:
             except ValueError:
                 pass
         return raw
+
     async def _login(self, page: Page) -> bool:
         """
-        Authenticate with GSCCCA. Credentials come from env vars
-        GSCCCA_USERNAME and GSCCCA_PASSWORD (stored as GitHub Secrets).
-
+        Authenticate with GSCCCA. Exhaustive selector list + logs ALL inputs on the page.
         NEVER raises – returns True on success, False on any failure.
-        Saves a debug screenshot to /tmp/gsccca_login_debug.png on failure.
+        Saves debug screenshot to /tmp/gsccca_login_debug.png on failure.
         """
         if not GSCCCA_USERNAME or not GSCCCA_PASSWORD:
-            log.warning(
-                "GSCCCA_USERNAME / GSCCCA_PASSWORD not set. "
-                "Add them as GitHub Secrets. Scraper will run without auth."
-            )
+            log.warning("GSCCCA_USERNAME / GSCCCA_PASSWORD not set. Scraper will run without auth.")
             return False
 
         log.info("Logging in to GSCCCA as %s …", GSCCCA_USERNAME)
         try:
+            # Navigate to login page
             await page.goto(GSCCCA_LOGIN_URL, wait_until="domcontentloaded")
-            await page.wait_for_load_state("networkidle", timeout=20000)
 
-            current_url = page.url
-            log.info("Login page URL: %s", current_url)
+            # Wait for at least one <input> to appear
+            try:
+                await page.wait_for_selector("input", timeout=15000)
+            except Exception:
+                log.warning("No <input> elements appeared within 15s on login page")
 
-            if "Login.aspx" not in current_url and "login.aspx" not in current_url:
-                log.info("Already authenticated (at %s)", current_url)
+            await page.wait_for_load_state("networkidle", timeout=15000)
+
+            page_url = page.url
+            page_title = await page.title()
+            log.info("Login page URL after load: %s | title: %s", page_url, page_title)
+
+            # Log ALL inputs on the page for debugging
+            all_inputs = await page.locator("input").all()
+            log.info("Found %d input element(s) on login page:", len(all_inputs))
+            for inp in all_inputs:
+                try:
+                    inp_id   = await inp.get_attribute("id")   or ""
+                    inp_name = await inp.get_attribute("name") or ""
+                    inp_type = await inp.get_attribute("type") or ""
+                    inp_ph   = await inp.get_attribute("placeholder") or ""
+                    log.info("  INPUT id=%r name=%r type=%r placeholder=%r", inp_id, inp_name, inp_type, inp_ph)
+                except Exception:
+                    pass
+
+            # Log iframes
+            frames = page.frames
+            log.info("Page has %d frame(s) (including main):", len(frames))
+            for fi, frame in enumerate(frames):
+                log.info("  Frame %d: url=%s", fi, frame.url)
+
+            # Check if already logged in
+            if "Login.aspx" not in page.url and "login.aspx" not in page.url:
+                log.info("Already authenticated (%s)", page.url)
                 return True
 
-            html_snippet = (await page.content())[:3000]
-            log.debug("Login page HTML (first 3000 chars): %s", html_snippet)
-
-            filled_user = False
-            for sel in [
-                "input#txtUserName",
-                "input[name='txtUserName']",
-                "input[id*='UserName' i]",
-                "input[name*='UserName' i]",
-                "input[name*='user' i]",
+            # ── Exhaustive username selectors ──
+            user_selectors = [
+                # Standard GSCCCA field names
+                "input#txtUserName",    "input[name='txtUserName']",
+                "input#UserName",       "input[name='UserName']",
+                "input#username",       "input[name='username']",
+                "input#Username",       "input[name='username']",
+                # ASP.NET ContentPlaceholder patterns
+                "input[id$='txtUserName']",  "input[id$='UserName']",
+                "input[id$='Username']",     "input[id$='UserName']",
+                # By type/placeholder
                 "input[type='email']",
-                "input[type='text']:first-of-type",
-            ]:
+                "input[placeholder*='user' i]",
+                "input[placeholder*='email' i]",
+                "input[placeholder*='login' i]",
+                "input[autocomplete='username']",
+                "input[autocomplete='email']",
+                # Generic fallback – first visible text input
+                "input[type='text']:visible",
+                "input:not([type='hidden']):not([type='password']):not([type='checkbox']):not([type='submit']):not([type='button']):visible",
+            ]
+
+            user_el = None
+            for sel in user_selectors:
                 try:
                     el = page.locator(sel).first
-                    if await el.count() > 0 and await el.is_visible(timeout=2000):
-                        await el.triple_click()
-                        await el.fill(GSCCCA_USERNAME)
-                        filled_user = True
-                        log.info("Username filled via selector: %s", sel)
+                    if await el.count() > 0 and await el.is_visible(timeout=1500):
+                        user_el = el
+                        log.info("Username field found via: %s", sel)
                         break
                 except Exception:
                     pass
 
-            if not filled_user:
-                log.error(
-                    "GSCCCA login: could not find username field. "
-                    "Page title: %s | URL: %s",
-                    await page.title(), page.url
-                )
+            if user_el is None:
+                log.error("Could not find username field after trying %d selectors", len(user_selectors))
                 await page.screenshot(path="/tmp/gsccca_login_debug.png", full_page=True)
-                log.info("Debug screenshot saved to /tmp/gsccca_login_debug.png")
                 return False  # NEVER raise
 
-            filled_pass = False
-            for sel in [
-                "input#txtPassword",
-                "input[name='txtPassword']",
+            await user_el.triple_click()
+            await user_el.fill(GSCCCA_USERNAME)
+            log.info("Username filled: %s", GSCCCA_USERNAME)
+
+            # ── Password selectors ──
+            pass_selectors = [
+                "input#txtPassword",         "input[name='txtPassword']",
+                "input#Password",            "input[name='Password']",
+                "input#password",            "input[name='password']",
+                "input[id$='txtPassword']",  "input[id$='Password']",
                 "input[type='password']",
-                "input[id*='Password' i]",
-                "input[name*='Password' i]",
-            ]:
+                "input[autocomplete='current-password']",
+                "input[placeholder*='pass' i]",
+            ]
+
+            pass_el = None
+            for sel in pass_selectors:
                 try:
                     el = page.locator(sel).first
-                    if await el.count() > 0 and await el.is_visible(timeout=2000):
-                        await el.triple_click()
-                        await el.fill(GSCCCA_PASSWORD)
-                        filled_pass = True
-                        log.info("Password filled via selector: %s", sel)
+                    if await el.count() > 0 and await el.is_visible(timeout=1500):
+                        pass_el = el
+                        log.info("Password field found via: %s", sel)
                         break
                 except Exception:
                     pass
 
-            if not filled_pass:
-                log.error("GSCCCA login: could not find password field")
+            if pass_el is None:
+                log.error("Could not find password field")
                 await page.screenshot(path="/tmp/gsccca_login_debug.png", full_page=True)
                 return False  # NEVER raise
+
+            await pass_el.triple_click()
+            await pass_el.fill(GSCCCA_PASSWORD)
+            log.info("Password filled")
+
+            # ── Submit selectors ──
+            submit_selectors = [
+                "input#btnLogin",            "input[name='btnLogin']",
+                "button#btnLogin",
+                "input#btnSubmit",           "input[name='btnSubmit']",
+                "input[id$='btnLogin']",     "input[id$='btnSubmit']",
+                "input[value='Login']",      "input[value='Log In']",
+                "input[value='Submit']",     "input[value='Sign In']",
+                "button:text('Login')",      "button:text('Log In')",
+                "button:text('Sign In')",    "button:text('Submit')",
+                "input[type='submit']",      "button[type='submit']",
+            ]
 
             submitted = False
-            for sel in [
-                "input#btnLogin",
-                "input[name='btnLogin']",
-                "button#btnLogin",
-                "input[value='Login']",
-                "input[value='Log In']",
-                "input[value='Submit']",
-                "button:text('Login')",
-                "button:text('Log In')",
-                "input[type='submit']",
-                "button[type='submit']",
-            ]:
+            for sel in submit_selectors:
                 try:
                     btn = page.locator(sel).first
-                    if await btn.count() > 0 and await btn.is_visible(timeout=2000):
+                    if await btn.count() > 0 and await btn.is_visible(timeout=1500):
                         await btn.click()
                         await page.wait_for_load_state("networkidle", timeout=25000)
                         submitted = True
@@ -701,26 +685,16 @@ class ClerkScraper:
             page_text = (await page.inner_text("body")).lower()
             log.info("Post-login URL: %s", post_url)
 
-            for err in [
-                "invalid username", "invalid password", "incorrect",
-                "login failed", "authentication failed", "access denied",
-                "please try again", "unable to log", "account not found",
-            ]:
+            for err in ["invalid username", "invalid password", "incorrect", "login failed",
+                        "authentication failed", "access denied", "please try again",
+                        "unable to log", "account not found"]:
                 if err in page_text:
-                    log.error(
-                        "GSCCCA login rejected with message '%s'. "
-                        "Check that GSCCCA_USERNAME and GSCCCA_PASSWORD secrets "
-                        "match your account at search.gsccca.org", err
-                    )
+                    log.error("GSCCCA login rejected: '%s'. Check GSCCCA_USERNAME/GSCCCA_PASSWORD secrets.", err)
                     await page.screenshot(path="/tmp/gsccca_login_debug.png", full_page=True)
                     return False  # NEVER raise
 
             if "Login.aspx" in post_url or "login.aspx" in post_url:
-                log.error(
-                    "GSCCCA still on login page after submit. "
-                    "Credentials may be wrong or form detection failed. "
-                    "URL: %s", post_url
-                )
+                log.error("Still on login page after submit. URL: %s", post_url)
                 await page.screenshot(path="/tmp/gsccca_login_debug.png", full_page=True)
                 return False  # NEVER raise
 
@@ -733,14 +707,10 @@ class ClerkScraper:
                 await page.screenshot(path="/tmp/gsccca_login_debug.png", full_page=True)
             except Exception:
                 pass
-            return False  # NEVER raise – scraper continues without auth
+            return False  # NEVER raise
+
     async def _dismiss_modals(self, page: Page) -> None:
-        for sel in [
-            "input[value='I Agree']", "button:text('I Agree')",
-            "button:text('Accept')", "a:text('I Agree')",
-            "#btnAgree", "[id*='Agree']", "[id*='agree']",
-            "button:text('OK')", "button:text('Continue')",
-        ]:
+        for sel in ["input[value='I Agree']","button:text('I Agree')","button:text('Accept')","a:text('I Agree')","#btnAgree","[id*='Agree']","[id*='agree']","button:text('OK')","button:text('Continue')"]:
             try:
                 btn = page.locator(sel).first
                 if await btn.is_visible(timeout=1500):
@@ -760,20 +730,14 @@ class ClerkScraper:
             log.error("Failed to load GSCCCA search page post-login: %s", exc)
             return False
         if "Login.aspx" in page.url or "login.aspx" in page.url:
-            log.warning(
-                "GSCCCA is showing login page – credentials may be wrong or "
-                "session did not persist. Attempting to scrape anyway."
-            )
+            log.warning("GSCCCA showing login page – credentials may be wrong. Attempting to scrape anyway.")
         await self._dismiss_modals(page)
         status = "authenticated" if logged_in else "UNAUTHENTICATED"
         log.info("GSCCCA search page ready [%s]", status)
         return True
 
     async def _set_county(self, page: Page, county_name: str = "FULTON", county_id: str = "60") -> bool:
-        county_selectors = [
-            "select#cboCounty", "select[name='cboCounty']",
-            "select[id*='County' i]", "select[name*='County' i]",
-        ]
+        county_selectors = ["select#cboCounty","select[name='cboCounty']","select[id*='County' i]","select[name*='County' i]"]
         for sel in county_selectors:
             try:
                 el = page.locator(sel).first
@@ -781,7 +745,6 @@ class ClerkScraper:
                     for val in [county_id, county_name, county_name.title(), county_name.capitalize()]:
                         try:
                             await el.select_option(value=val)
-                            log.debug("County %s set by value=%s", county_name, val)
                             return True
                         except Exception:
                             pass
@@ -802,12 +765,10 @@ class ClerkScraper:
                 pass
         log.warning("Could not set county %s – skipping", county_name)
         return False
+
     async def _set_instrument_type(self, page: Page, doc_code: str) -> bool:
         candidates = self.GSCCCA_INSTRUMENT_MAP.get(doc_code, [doc_code])
-        inst_selectors = [
-            "select#cboInstrumentType", "select[name='cboInstrumentType']",
-            "select[id*='Instrument' i]", "select[name*='Instrument' i]", "select[id*='Type' i]",
-        ]
+        inst_selectors = ["select#cboInstrumentType","select[name='cboInstrumentType']","select[id*='Instrument' i]","select[name*='Instrument' i]","select[id*='Type' i]"]
         for sel in inst_selectors:
             try:
                 el = page.locator(sel).first
@@ -820,7 +781,6 @@ class ClerkScraper:
                                 await el.select_option(value=cand)
                             else:
                                 await el.select_option(label=cand)
-                            log.debug("Instrument type set: %s via %s=%s", doc_code, method, cand)
                             return True
                         except Exception:
                             pass
@@ -831,22 +791,13 @@ class ClerkScraper:
                     for cand in candidates:
                         if cand.upper() in text or (val and cand.upper() in val.upper()):
                             await el.select_option(value=val)
-                            log.info("Instrument type %s matched via scan: '%s' (value=%s)", doc_code, text.strip(), val)
                             return True
             except Exception as exc:
                 log.debug("Instrument selector %s error: %s", sel, exc)
-        log.warning("No instrument dropdown match for %s – will search ALL types and filter", doc_code)
         return False
 
     async def _set_date_range(self, page: Page, start_date: str, end_date: str) -> None:
-        date_pairs = [
-            ("input#txtDateFrom", "input#txtDateTo"),
-            ("input[name='txtDateFrom']", "input[name='txtDateTo']"),
-            ("input[id*='DateFrom' i]", "input[id*='DateTo' i]"),
-            ("input[id*='FromDate' i]", "input[id*='ToDate' i]"),
-            ("input[id*='StartDate' i]", "input[id*='EndDate' i]"),
-            ("input[placeholder*='From' i]", "input[placeholder*='To' i]"),
-        ]
+        date_pairs = [("input#txtDateFrom","input#txtDateTo"),("input[name='txtDateFrom']","input[name='txtDateTo']"),("input[id*='DateFrom' i]","input[id*='DateTo' i]"),("input[id*='FromDate' i]","input[id*='ToDate' i]"),("input[id*='StartDate' i]","input[id*='EndDate' i]")]
         for from_sel, to_sel in date_pairs:
             try:
                 frm = page.locator(from_sel).first
@@ -856,24 +807,17 @@ class ClerkScraper:
                     await frm.fill(start_date)
                     await too.triple_click()
                     await too.fill(end_date)
-                    log.debug("Date range set: %s → %s", start_date, end_date)
                     return
             except Exception:
                 pass
-        log.warning("Could not set date range fields")
 
     async def _submit_search(self, page: Page) -> None:
-        for sel in [
-            "input#btnSearch", "input[name='btnSearch']", "button#btnSearch",
-            "input[value='Search']", "input[value='Submit']",
-            "button:text('Search')", "input[type='submit']", "button[type='submit']",
-        ]:
+        for sel in ["input#btnSearch","input[name='btnSearch']","button#btnSearch","input[value='Search']","input[value='Submit']","button:text('Search')","input[type='submit']","button[type='submit']"]:
             try:
                 btn = page.locator(sel).first
                 if await btn.is_visible(timeout=3000):
                     await btn.click()
                     await page.wait_for_load_state("networkidle", timeout=20000)
-                    log.debug("Search submitted via: %s", sel)
                     return
             except Exception:
                 pass
@@ -883,33 +827,26 @@ class ClerkScraper:
         records: List[Dict[str, Any]] = []
         soup = BeautifulSoup(html, "lxml")
         table = None
-        for tbl_id in ["GridView1", "gvResults", "GridViewResults", "dgResults", "ctl00_ContentPlaceHolder1_GridView1"]:
+        for tbl_id in ["GridView1","gvResults","GridViewResults","dgResults","ctl00_ContentPlaceHolder1_GridView1"]:
             t = soup.find("table", {"id": tbl_id})
             if t:
                 table = t
                 break
         if not table:
             for t in soup.find_all("table"):
-                ths = t.find_all("th")
-                if len(ths) >= 4:
+                if len(t.find_all("th")) >= 4:
                     table = t
                     break
         if not table:
-            no_rec = soup.find(string=re.compile(r"no records|no results|0 record|nothing found|no data", re.I))
-            if no_rec:
-                log.debug("GSCCCA: no records message found for %s", doc_code)
-            else:
-                log.debug("GSCCCA: no results table found for %s", doc_code)
             return []
         header_row = table.find("tr")
         if not header_row:
             return []
-        headers = [clean_str(th.get_text()) for th in header_row.find_all(["th", "td"])]
+        headers = [clean_str(th.get_text()) for th in header_row.find_all(["th","td"])]
         col_map = self._map_gsccca_columns(headers)
-        log.debug("GSCCCA columns: %s → col_map: %s", headers, col_map)
         label, cat = DOC_TYPES.get(doc_code, (doc_code, doc_code))
         for tr in table.find_all("tr")[1:]:
-            cells = tr.find_all(["td", "th"])
+            cells = tr.find_all(["td","th"])
             if len(cells) < 3:
                 continue
             try:
@@ -955,48 +892,25 @@ class ClerkScraper:
                 inst_type = cv("inst_type") or label
                 if filter_by_type:
                     candidates = self.GSCCCA_INSTRUMENT_MAP.get(doc_code, [])
-                    match_found = any(c.upper() in inst_type.upper() for c in candidates)
-                    if not match_found:
+                    if not any(c.upper() in inst_type.upper() for c in candidates):
                         continue
-                if not clerk_url:
-                    if book and page_num_str:
-                        clerk_url = (
-                            f"https://search.gsccca.org/RealEstateIndex.aspx"
-                            f"?county={county_id}&book={book}&page={page_num_str}"
-                            f"&instrumenttype={doc_code}"
-                        )
-                records.append({
-                    "doc_num": doc_num, "doc_type": inst_type if inst_type else label,
-                    "doc_code": doc_code, "filed": self._normalise_date(filed_raw),
-                    "grantor": cv("grantor"), "grantee": cv("grantee"),
-                    "legal": cv("legal"), "amount": cv("amount"),
-                    "clerk_url": clerk_url, "cat": cat, "cat_label": CATEGORY_LABELS.get(cat, cat),
-                })
+                if not clerk_url and book and page_num_str:
+                    clerk_url = f"https://search.gsccca.org/RealEstateIndex.aspx?county=60&book={book}&page={page_num_str}&instrumenttype={doc_code}"
+                records.append({"doc_num": doc_num, "doc_type": inst_type if inst_type else label, "doc_code": doc_code, "filed": self._normalise_date(filed_raw), "grantor": cv("grantor"), "grantee": cv("grantee"), "legal": cv("legal"), "amount": cv("amount"), "clerk_url": clerk_url, "cat": cat, "cat_label": CATEGORY_LABELS.get(cat, cat)})
             except Exception as exc:
                 log.debug("Row parse error: %s", exc)
         return records
+
     @staticmethod
     def _map_gsccca_columns(headers: List[str]) -> Dict[str, int]:
         mapping: Dict[str, int] = {}
-        patterns = {
-            "book": r"book",
-            "page_num": r"\bpage\b",
-            "file_num": r"file\s*(no|num|number)|doc\s*(no|num)",
-            "filed": r"date|filed|record",
-            "grantor": r"grantor|seller|owner|from|debtor",
-            "grantee": r"grantee|buyer|lender|to\b|creditor",
-            "inst_type": r"instrument|type|doc.?type",
-            "legal": r"legal|desc|property|parcel",
-            "amount": r"amount|consider|value|\$",
-            "doc_num": r"doc.?(num|no\b|number)|instrument.?no",
-        }
+        patterns = {"book": r"book", "page_num": r"\bpage\b", "file_num": r"file\s*(no|num|number)|doc\s*(no|num)", "filed": r"date|filed|record", "grantor": r"grantor|seller|owner|from|debtor", "grantee": r"grantee|buyer|lender|to\b|creditor", "inst_type": r"instrument|type|doc.?type", "legal": r"legal|desc|property|parcel", "amount": r"amount|consider|value|\$", "doc_num": r"doc.?(num|no\b|number)|instrument.?no"}
         for idx, header in enumerate(headers):
             h = header.lower()
             for field, pattern in patterns.items():
                 if field not in mapping and re.search(pattern, h):
                     mapping[field] = idx
         return mapping
-
     async def _paginate(self, page: Page, doc_code: str, filter_by_type: bool) -> List[Dict[str, Any]]:
         all_records: List[Dict[str, Any]] = []
         current_page = 1
@@ -1005,7 +919,7 @@ class ClerkScraper:
             html = await page.content()
             recs = self._parse_results_page(html, doc_code, filter_by_type)
             all_records.extend(recs)
-            log.info(" Page %d → %d records (total so far: %d)", current_page, len(recs), len(all_records))
+            log.info(" Page %d → %d records (total: %d)", current_page, len(recs), len(all_records))
             if current_page == 1 and not recs:
                 break
             soup = BeautifulSoup(html, "lxml")
@@ -1058,12 +972,11 @@ class ClerkScraper:
         try:
             await page.evaluate(f"__doPostBack('GridView1','Page${current_page + 1}')")
             await page.wait_for_load_state("networkidle", timeout=15000)
-            html_after = await page.content()
-            if f"Page${current_page + 1}" not in html_after:
-                return True
+            return True
         except Exception:
             pass
         return False
+
     async def _scrape_one_type(self, page: Page, doc_code: str, start_date: str, end_date: str, county_name: str = "FULTON", county_id: str = "60") -> List[Dict[str, Any]]:
         try:
             await page.goto(self.SEARCH_URL, wait_until="domcontentloaded")
@@ -1083,12 +996,12 @@ class ClerkScraper:
         all_records: List[Dict[str, Any]] = []
         seen: set = set()
         total_counties = len(ACTIVE_COUNTIES)
-        log.info("Scraping %d %s: %s", total_counties, "county" if total_counties == 1 else "counties", ", ".join(n for n, _ in ACTIVE_COUNTIES))
+        log.info("Scraping %d counties: %s", total_counties, ", ".join(n for n, _ in ACTIVE_COUNTIES))
         ctx, page = await self._new_page()
         try:
             loaded = await self._load_search_page(page)
             if not loaded:
-                log.warning("GSCCCA search page did not load cleanly – continuing anyway (may get partial or no results)")
+                log.warning("GSCCCA search page did not load cleanly – continuing anyway")
             for c_idx, (county_name, county_id) in enumerate(ACTIVE_COUNTIES, 1):
                 log.info("▶ County %d/%d: %s (id=%s)", c_idx, total_counties, county_name, county_id)
                 county_new = 0
@@ -1209,7 +1122,6 @@ def enrich_records(raw_records: List[Dict[str, Any]], parcel_lookup: ParcelLooku
             enriched.append(e)
         except Exception as exc:
             log.warning("Enrichment failed for record %s: %s", rec.get("doc_num"), exc)
-    enriched.sort(key=lambda r: (-r["score"], r.get("filed", "") or ""), reverse=False)
     enriched.sort(key=lambda r: r["score"], reverse=True)
     return enriched
 def write_json_outputs(records: List[Dict[str, Any]], start_date: str, end_date: str) -> None:
@@ -1234,13 +1146,7 @@ def write_json_outputs(records: List[Dict[str, Any]], start_date: str, end_date:
 def write_ghl_csv(records: List[Dict[str, Any]]) -> None:
     path = Path(GHL_CSV_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
-    COLUMNS = [
-        "First Name", "Last Name", "County", "Mailing Address", "Mailing City",
-        "Mailing State", "Mailing Zip", "Property Address", "Property City",
-        "Property State", "Property Zip", "Lead Type", "Document Type",
-        "Date Filed", "Document Number", "Amount/Debt Owed", "Seller Score",
-        "Motivated Seller Flags", "Source", "Public Records URL",
-    ]
+    COLUMNS = ["First Name","Last Name","County","Mailing Address","Mailing City","Mailing State","Mailing Zip","Property Address","Property City","Property State","Property Zip","Lead Type","Document Type","Date Filed","Document Number","Amount/Debt Owed","Seller Score","Motivated Seller Flags","Source","Public Records URL"]
     def split_name(full: str) -> Tuple[str, str]:
         full = clean_str(full)
         if not full:
@@ -1268,7 +1174,7 @@ def write_ghl_csv(records: List[Dict[str, Any]]) -> None:
                     "Date Filed": rec.get("filed", ""), "Document Number": rec.get("doc_num", ""),
                     "Amount/Debt Owed": rec.get("amount", ""), "Seller Score": rec.get("score", 0),
                     "Motivated Seller Flags": " | ".join(rec.get("flags", [])),
-                    "Source": "Fulton County Superior Court Clerk (search.gsccca.org)",
+                    "Source": "Georgia GSCCCA (search.gsccca.org)",
                     "Public Records URL": rec.get("clerk_url", ""),
                 })
         log.info("GHL CSV written: %s (%d rows)", path, len(records))
@@ -1278,11 +1184,8 @@ def write_ghl_csv(records: List[Dict[str, Any]]) -> None:
 
 async def main() -> None:
     start_date, end_date = date_range_strings(LOOKBACK_DAYS)
-    log.info(
-        "Starting Georgia Motivated Seller Scraper | "
-        "counties: %s | date range: %s → %s | lookback_days: %d",
-        ", ".join(n for n,_ in ACTIVE_COUNTIES), start_date, end_date, LOOKBACK_DAYS,
-    )
+    log.info("Starting Georgia Motivated Seller Scraper | counties: %s | date range: %s → %s | lookback_days: %d",
+             ", ".join(n for n,_ in ACTIVE_COUNTIES), start_date, end_date, LOOKBACK_DAYS)
     parcel = ParcelLookup()
     try:
         parcel.load()
@@ -1292,7 +1195,7 @@ async def main() -> None:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=HEADLESS,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            args=["--no-sandbox","--disable-setuid-sandbox","--disable-dev-shm-usage","--disable-gpu"],
         )
         try:
             scraper = ClerkScraper(browser)

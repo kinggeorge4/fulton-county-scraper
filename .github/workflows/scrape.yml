@@ -2,7 +2,6 @@ name: Scrape Fulton County Motivated Sellers
 
 on:
   schedule:
-    # Run daily at 7:00 AM UTC (3 AM ET)
     - cron: "0 7 * * *"
   workflow_dispatch:
     inputs:
@@ -27,7 +26,6 @@ permissions:
   pages: write
   id-token: write
 
-# Allow only one concurrent deployment; cancel in-progress runs
 concurrency:
   group: "pages"
   cancel-in-progress: false
@@ -38,13 +36,11 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      # ── Checkout ──────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      # ── Python setup ──────────────────────────────────────────────────────
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -57,11 +53,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml dbfread playwright
 
-      # ── Playwright setup ───────────────────────────────────────────────────
       - name: Install Playwright Chromium + system deps
         run: python -m playwright install --with-deps chromium
 
-      # ── Run scraper ────────────────────────────────────────────────────────
       - name: Run Fulton County scraper
         env:
           LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '7' }}
@@ -72,7 +66,14 @@ jobs:
           GSCCCA_PASSWORD: ${{ secrets.GSCCCA_PASSWORD }}
         run: python scraper/fetch.py
 
-      # ── Commit & push outputs ──────────────────────────────────────────────
+      - name: Upload GSCCCA login debug screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gsccca-login-debug
+          path: /tmp/gsccca_login_debug.png
+          if-no-files-found: ignore
+
       - name: Commit and push records
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -80,10 +81,8 @@ jobs:
           git config --local user.email "atlas-bot@propstor.com"
           git config --local user.name "Atlas Scraper Bot"
 
-          # Stage output files (ignore if missing)
           git add dashboard/records.json data/records.json data/ghl_export.csv 2>/dev/null || true
 
-          # Only commit if there are staged changes
           if git diff --cached --quiet; then
             echo "No changes to commit – records unchanged since last run"
             exit 0
@@ -91,11 +90,9 @@ jobs:
 
           git commit -m "🤖 Auto-update: GA motivated seller leads $(date -u +'%Y-%m-%d %H:%M UTC')"
 
-          # Pull any remote changes that arrived since checkout, then push
           git pull --rebase origin main
           git push origin HEAD:main
 
-  # ── Deploy dashboard to GitHub Pages ─────────────────────────────────────
   deploy-pages:
     needs: scrape
     runs-on: ubuntu-22.04
@@ -107,7 +104,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }} # pick up the freshly committed records.json
+          ref: ${{ github.ref }}
           fetch-depth: 1
 
       - name: Setup GitHub Pages
@@ -116,7 +113,7 @@ jobs:
       - name: Upload dashboard artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: dashboard/ # serves index.html + records.json
+          path: dashboard/
 
       - name: Deploy to GitHub Pages
         id: deployment
