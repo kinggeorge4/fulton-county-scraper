@@ -127,9 +127,11 @@ ACTIVE_COUNTIES: "List[Tuple[str, str]]" = _resolve_counties()
 PARCEL_BASE_URL  = "https://fultoncountypropertyappraiser.org"
 PARCEL_SEARCH_URL = "https://fultoncountypropertyappraiser.org/property-search/"
 
-# ── GSCCCA CREDENTIALS ───────────────────────────────────────────────────────
-# Store as GitHub Secrets: GSCCCA_USERNAME  and  GSCCCA_PASSWORD
-# repo → Settings → Secrets and variables → Actions → New repository secret
+# ── GSCCCA AUTH ───────────────────────────────────────────────────────────────
+# Option A (recommended): paste the GSCCCA_COOKIES JSON from get_gsccca_cookie.py
+# Option B (fallback):    set GSCCCA_USERNAME + GSCCCA_PASSWORD
+# Store all of these as GitHub Secrets.
+GSCCCA_COOKIES:  str = os.getenv("GSCCCA_COOKIES",  "")   # JSON cookie bundle
 GSCCCA_USERNAME: str = os.getenv("GSCCCA_USERNAME", "")
 GSCCCA_PASSWORD: str = os.getenv("GSCCCA_PASSWORD", "")
 GSCCCA_LOGIN_URL: str = "https://search.gsccca.org/Login.aspx"
@@ -665,131 +667,167 @@ class ParcelLookup:
                 return self._index[key]
         return {}
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# CLERK PORTAL SCRAPER  (Playwright async)
-# Target: Georgia Superior Court Clerks' Cooperative Authority
-#   https://search.gsccca.org/RealEstateIndex.aspx
-# This is the official statewide index for all 159 GA counties.
+# GSCCCA SCRAPER  (requests-based — no Playwright needed for searching)
+#
+# Confirmed URLs (from live browser session):
+#   Main site:   https://www.gsccca.org
+#   RE Search:   https://search.gsccca.org/RealEstate/InstrumentTypeSearch.aspx
+#   Lien Search: https://search.gsccca.org/Lien/namesearch.asp
+#   RE Detail:   https://search.gsccca.org/RealEstate/deedinfo.aspx
+#
+# Auth: GSCCCA_COOKIES secret (JSON from get_gsccca_cookie.py)
 # ─────────────────────────────────────────────────────────────────────────────
+
+GSCCCA_RE_SEARCH   = "https://search.gsccca.org/RealEstate/InstrumentTypeSearch.aspx"
+GSCCCA_LIEN_SEARCH = "https://search.gsccca.org/Lien/namesearch.asp"
+
+# Exact instrument dropdown values from the GSCCCA Real Estate Index
+RE_INSTRUMENTS: Dict[str, str] = {
+    "NOFC":   "DEED - FORECLOSURE",
+    "TAXDEED":"TAX SALE DEED",
+    "JUD":    "COURT ORDER",
+    "LIEN":   "LIEN",
+    "LNMECH": "MATERIALMANS LIEN",
+    "PRO":    "ESTATE DOCUMENTATION",
+    "PRO2":   "DEED - FROM ESTATE",
+    "NOC":    "NOTICE",
+    "LP":     "NOTICE",
+    "RELLP":  "RELEASE",
+    "SHRF":   "SHERIFF'S DEED",
+}
+
+# Lien Index instrument types
+LIEN_INSTRUMENTS: Dict[str, str] = {
+    "LNIRS":    "FEDERAL TAX LIEN",
+    "LNFED":    "FEDERAL LIEN",
+    "LNCORPTX": "STATE TAX LIEN",
+    "LNHOA":    "CLAIM OF LIEN",
+    "MEDLN":    "MEDICAID LIEN",
+}
+
 
 class ClerkScraper:
     """
-    Scrapes https://search.gsccca.org for Fulton County real-estate index
-    filings (LP, NOFC, TAXDEED, JUD, liens, PRO, NOC, RELLP …).
-
-    GSCCCA uses ASP.NET WebForms with __doPostBack pagination.
-    Playwright maintains the full browser session / ViewState automatically.
-
-    Search flow:
-      1. Navigate to RealEstateIndex.aspx
-      2. Select county = FULTON
-      3. Select instrument type from dropdown
-      4. Set date range (From / To)
-      5. Click Search
-      6. Parse results table – columns: Book/Page, Date, Grantor, Grantee,
-         Instrument Type, Description/Legal
-      7. Paginate via __doPostBack("GridView1","Page$N")
-      8. For each row, construct the direct document URL
+    Scrapes GSCCCA using direct HTTP requests with injected session cookies.
+    Real Estate uses the Premium Instrument Type Search.
+    Liens use the Lien Index Name Search with % wildcard.
+    No Playwright required for searching — only for the one-time cookie capture.
     """
 
-    # GSCCCA real-estate index base
-    SEARCH_URL = "https://search.gsccca.org/RealEstateIndex.aspx"
-
-    # Maps our internal doc codes -> GSCCCA instrument type dropdown values
-    # These are the option *values* used in the <select> on the GSCCCA form.
-    # If a code isn't found in the dropdown we search by the text label instead.
-    GSCCCA_INSTRUMENT_MAP: Dict[str, List[str]] = {
-        "LP":       ["LP",  "LIS PENDENS",           "Lis Pendens"],
-        "NOFC":     ["NOFC","NOTICE OF FORECLOSURE",  "Notice of Foreclosure",
-                     "NF",  "NOTICEOFFORECLOS"],
-        "TAXDEED":  ["TAXD","TAX DEED",               "Tax Deed",
-                     "TD",  "TAXDEED"],
-        "JUD":      ["JUD", "JUDGMENT",               "Judgment",
-                     "JUDG","J"],
-        "CCJ":      ["CCJ", "CERTIFIED COPY JUDGMENT","Certified Copy Judgment",
-                     "CJ"],
-        "DRJUD":    ["DRJUD","DOMESTIC RELATIONS JUDGMENT",
-                     "Domestic Relations Judgment","DR"],
-        "LNCORPTX": ["LNCORPTX","CORP TAX LIEN","Corporate Tax Lien",
-                     "FTL","STATE TAX LIEN","LNST"],
-        "LNIRS":    ["LNIRS","IRS LIEN","Federal Tax Lien","LNFED","FLN",
-                     "FEDERAL TAX LIEN"],
-        "LNFED":    ["LNFED","FEDERAL LIEN","FEDERAL TAX LIEN","FTL"],
-        "LN":       ["LN",  "LIEN"],
-        "LNMECH":   ["LNMECH","MATERIALMAN'S LIEN","MECHANIC'S LIEN",
-                     "ML",  "MATERIALMAN","Materialman"],
-        "LNHOA":    ["LNHOA","HOA LIEN","HOMEOWNERS ASSOC LIEN"],
-        "MEDLN":    ["MEDLN","MEDICAID LIEN","MED LIEN"],
-        "PRO":      ["PRO", "PROBATE","Letters Testamentary",
-                     "Letters of Administration","LT","LA"],
-        "NOC":      ["NOC", "NOTICE OF COMMENCEMENT","Notice of Commencement"],
-        "RELLP":    ["RELLP","RELEASE LIS PENDENS","Release Lis Pendens","RLP"],
-    }
-
-    def __init__(self, browser: Browser) -> None:
-        self.browser = browser
-
     # ──────────────────────────────────────────────────────────────────────
-    async def _new_page(self) -> Tuple["BrowserContext", Page]:
-        ctx = await self.browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent=(
+    def _build_session(self) -> requests.Session:
+        """Build an authenticated requests session from GSCCCA_COOKIES."""
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/124.0.0.0 Safari/537.36"
             ),
-            locale="en-US",
-            timezone_id="America/New_York",
-            # Mimic real browser headers
-            extra_http_headers={
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate, br",
-            },
-        )
-        ctx.set_default_timeout(PAGE_TIMEOUT)
-        ctx.set_default_navigation_timeout(NAV_TIMEOUT)
-        page = await ctx.new_page()
+            "Accept":          "text/html,application/xhtml+xml,*/*;q=0.9",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection":      "keep-alive",
+        })
 
-        # ── Stealth: remove Playwright/Chromium automation fingerprints ──────
-        await page.add_init_script("""
-            // Remove webdriver flag
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            // Spoof plugins (real browsers have plugins)
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5],
-            });
-            // Spoof languages
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['en-US', 'en'],
-            });
-            // Remove automation chrome flags
-            window.chrome = {runtime: {}};
-            // Prevent iframe detection
-            Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
-        """)
-        return ctx, page
+        if GSCCCA_COOKIES.strip():
+            try:
+                raw = json.loads(GSCCCA_COOKIES)
+                if isinstance(raw, dict):
+                    raw = [raw]
+                for c in raw:
+                    session.cookies.set(
+                        c.get("name", ""), c.get("value", ""),
+                        domain=c.get("domain", "search.gsccca.org"),
+                        path=c.get("path", "/"),
+                    )
+                log.info("Session: injected %d cookie(s)", len(raw))
+            except Exception as exc:
+                log.error("Cookie injection error: %s", exc)
+        elif GSCCCA_USERNAME and GSCCCA_PASSWORD:
+            self._http_login(session)
+        else:
+            log.warning(
+                "No GSCCCA auth. Run get_gsccca_cookie.py and set GSCCCA_COOKIES secret."
+            )
+        return session
+
+    # ──────────────────────────────────────────────────────────────────────
+    def _http_login(self, session: requests.Session) -> bool:
+        """Fallback: attempt HTTP POST login to www.gsccca.org."""
+        try:
+            import cloudscraper
+            s = cloudscraper.create_scraper(
+                browser={"browser": "chrome", "platform": "windows", "mobile": False}
+            )
+        except ImportError:
+            s = session
+
+        try:
+            r = s.get(GSCCCA_LOGIN_URL, timeout=30)
+            soup = BeautifulSoup(r.text, "lxml")
+            payload = {}
+            for inp in soup.find_all("input"):
+                n = inp.get("name") or ""
+                t = (inp.get("type") or "").lower()
+                if n.startswith("__"):
+                    payload[n] = inp.get("value", "")
+                elif t in ("text", "email") and n:
+                    payload[n] = GSCCCA_USERNAME
+                elif t == "password" and n:
+                    payload[n] = GSCCCA_PASSWORD
+                elif t == "submit" and n:
+                    payload[n] = inp.get("value", "Login")
+
+            r2 = s.post(GSCCCA_LOGIN_URL, data=payload, timeout=30)
+            if "login" not in r2.url.lower():
+                session.cookies.update(s.cookies)
+                log.info("HTTP login succeeded")
+                return True
+            log.warning("HTTP login: still on login page")
+            return False
+        except Exception as exc:
+            log.error("HTTP login error: %s", exc)
+            return False
+
+    # ──────────────────────────────────────────────────────────────────────
+    def _get_aspnet_fields(
+        self, session: requests.Session, url: str
+    ) -> Dict[str, str]:
+        """GET a page and return its ASP.NET hidden form fields."""
+        try:
+            r = session.get(url, timeout=30)
+            soup = BeautifulSoup(r.text, "lxml")
+            fields = {}
+            for name in ["__VIEWSTATE", "__VIEWSTATEGENERATOR",
+                         "__EVENTVALIDATION", "__EVENTTARGET", "__EVENTARGUMENT"]:
+                el = soup.find("input", {"name": name})
+                if el:
+                    fields[name] = el.get("value", "")
+            return fields
+        except Exception as exc:
+            log.warning("Could not fetch ASP.NET fields from %s: %s", url, exc)
+            return {}
 
     # ──────────────────────────────────────────────────────────────────────
     @staticmethod
     def _normalise_date(raw: str) -> str:
-        """Convert various date strings to YYYY-MM-DD."""
         if not raw:
             return ""
         raw = clean_str(raw)
         for fmt in ("%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%d", "%m/%d/%y",
-                    "%B %d, %Y", "%b %d, %Y", "%d/%m/%Y"):
+                    "%B %d, %Y", "%b %d, %Y"):
             try:
                 return datetime.strptime(raw[:20], fmt).strftime("%Y-%m-%d")
             except ValueError:
                 pass
-        m = re.search(r"(\d{4})-(\d{2})-(\d{2})", raw)
-        if m:
-            return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
         m = re.search(r"(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})", raw)
         if m:
             mo, dy, yr = m.group(1), m.group(2), m.group(3)
             if len(yr) == 2:
-                yr = "20" + yr if int(yr) < 50 else "19" + yr
+                yr = "20" + yr
             try:
                 return datetime(int(yr), int(mo), int(dy)).strftime("%Y-%m-%d")
             except ValueError:
@@ -797,863 +835,359 @@ class ClerkScraper:
         return raw
 
     # ──────────────────────────────────────────────────────────────────────
-    # ──────────────────────────────────────────────────────────────────────
-    def _http_login(self) -> Optional[Dict[str, str]]:
-        """
-        Login to GSCCCA bypassing Cloudflare bot detection.
-        Uses cloudscraper (handles CF JavaScript challenges automatically).
-        Falls back to plain requests if cloudscraper is unavailable.
+    def _search_re(
+        self,
+        session: requests.Session,
+        instrument: str,
+        county: str,
+        start_date: str,
+        end_date: str,
+    ) -> List[Dict[str, Any]]:
+        """Search Real Estate Instrument Type Search (Premium)."""
+        records: List[Dict[str, Any]] = []
+        fields = self._get_aspnet_fields(session, GSCCCA_RE_SEARCH)
 
-        Flow:
-          1. GET Login.aspx → grab ASP.NET __VIEWSTATE / __EVENTVALIDATION
-          2. POST credentials + viewstate → server sets ASP.NET_SessionId cookie
-          3. Return cookie dict for injection into Playwright context
+        payload = {
+            **fields,
+            "InstrumentType":   instrument,
+            "County":           county,
+            "DateFrom":         start_date,
+            "DateThru":         end_date,
+            "Display":          "100",
+            "TableDisplayType": "Dashboard",
+            "SearchButton":     "Begin Search",
+        }
 
-        Returns dict of cookies on success, None on failure.
-        """
-        if not GSCCCA_USERNAME or not GSCCCA_PASSWORD:
-            return None
+        page_url = GSCCCA_RE_SEARCH
+        page_num = 0
 
-        # Use cloudscraper to bypass Cloudflare bot detection
-        # Falls back to requests if cloudscraper not installed
-        try:
-            import cloudscraper
-            session = cloudscraper.create_scraper(
-                browser={"browser": "chrome", "platform": "windows", "mobile": False}
-            )
-            log.info("HTTP login: using cloudscraper (Cloudflare bypass)")
-        except ImportError:
-            log.warning("cloudscraper not installed – falling back to requests")
-            session = requests.Session()
-            session.headers.update({
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
-            })
+        while page_num < MAX_PAGES_PER_DOCTYPE:
+            page_num += 1
+            try:
+                if page_num == 1:
+                    r = session.post(
+                        GSCCCA_RE_SEARCH, data=payload, timeout=60,
+                        headers={"Referer": GSCCCA_RE_SEARCH},
+                    )
+                else:
+                    r = session.get(page_url, timeout=30)
+                r.raise_for_status()
+            except Exception as exc:
+                log.error("RE search error page %d: %s", page_num, exc)
+                break
 
-        try:
-            # Step 1 – GET the login page and extract ASP.NET form state
-            log.info("HTTP login: GETting %s …", GSCCCA_LOGIN_URL)
-            r = session.get(GSCCCA_LOGIN_URL, timeout=30, allow_redirects=True)
-            r.raise_for_status()
-            log.info("HTTP login: GET status=%d, content-length=%d",
-                     r.status_code, len(r.content))
+            if "login" in r.url.lower():
+                log.error("RE search: redirected to login – cookies expired")
+                break
 
             soup = BeautifulSoup(r.text, "lxml")
+            page_recs = self._parse_re_dashboard(soup, instrument, county)
+            records.extend(page_recs)
+            log.info("    Page %d → %d records", page_num, len(page_recs))
 
-            # Extract hidden ASP.NET fields
-            def hidden(name: str) -> str:
-                el = soup.find("input", {"name": name})
-                return el["value"] if el and el.get("value") else ""
+            if not page_recs:
+                break
 
-            viewstate       = hidden("__VIEWSTATE")
-            viewstate_gen   = hidden("__VIEWSTATEGENERATOR")
-            event_val       = hidden("__EVENTVALIDATION")
-            event_target    = hidden("__EVENTTARGET")
-            event_argument  = hidden("__EVENTARGUMENT")
+            # Next page link
+            next_a = soup.find("a", string="[Next Page]")
+            if not next_a or not next_a.get("href"):
+                break
+            href = next_a["href"]
+            page_url = href if href.startswith("http") else \
+                       "https://search.gsccca.org" + href
 
-            # Detect the actual username/password field names from the HTML
-            user_field = "txtUserName"  # default
-            pass_field = "txtPassword"
-            submit_field = "btnLogin"
-
-            for inp in soup.find_all("input"):
-                itype = (inp.get("type") or "").lower()
-                iname = inp.get("name") or ""
-                iid   = inp.get("id")   or ""
-                if itype in ("text", "email") and iname:
-                    user_field = iname
-                    log.info("HTTP login: detected username field name=%r id=%r", iname, iid)
-                elif itype == "password" and iname:
-                    pass_field = iname
-                    log.info("HTTP login: detected password field name=%r id=%r", iname, iid)
-                elif itype == "submit" and iname:
-                    submit_field = iname
-                    log.info("HTTP login: detected submit field name=%r", iname)
-
-            # Determine form action URL
-            form = soup.find("form")
-            action_url = GSCCCA_LOGIN_URL
-            if form and form.get("action"):
-                action = form["action"]
-                action_url = (
-                    action if action.startswith("http")
-                    else urljoin(CLERK_BASE_URL, action)
-                )
-            log.info("HTTP login: form action=%s", action_url)
-            log.info("HTTP login: user_field=%r pass_field=%r submit_field=%r",
-                     user_field, pass_field, submit_field)
-            log.info("HTTP login: __VIEWSTATE length=%d", len(viewstate))
-
-            # Step 2 – POST login form
-            payload = {
-                "__EVENTTARGET":        event_target,
-                "__EVENTARGUMENT":      event_argument,
-                "__VIEWSTATE":          viewstate,
-                "__VIEWSTATEGENERATOR": viewstate_gen,
-                "__EVENTVALIDATION":    event_val,
-                user_field:             GSCCCA_USERNAME,
-                pass_field:             GSCCCA_PASSWORD,
-                submit_field:           "Login",
-            }
-
-            log.info("HTTP login: POSTing credentials to %s …", action_url)
-            r2 = session.post(
-                action_url,
-                data=payload,
-                timeout=30,
-                allow_redirects=True,
-                headers={"Referer": GSCCCA_LOGIN_URL,
-                         "Content-Type": "application/x-www-form-urlencoded"},
-            )
-            log.info("HTTP login: POST status=%d url=%s", r2.status_code, r2.url)
-
-            # Check for login failure text
-            body_lower = r2.text.lower()
-            for err in ["invalid username", "invalid password", "incorrect",
-                        "login failed", "please try again", "access denied"]:
-                if err in body_lower:
-                    log.error("HTTP login rejected: '%s' in response", err)
-                    return None
-
-            # Still on login page?
-            if "Login.aspx" in r2.url or "login.aspx" in r2.url:
-                log.error(
-                    "HTTP login: still on login page after POST. "
-                    "Check GSCCCA_USERNAME / GSCCCA_PASSWORD secrets."
-                )
-                return None
-
-            # Collect cookies
-            cookies = {c.name: c.value for c in session.cookies}
-            log.info("HTTP login: success → url=%s | cookies=%s",
-                     r2.url, list(cookies.keys()))
-            return cookies
-
-        except Exception as exc:
-            log.error("HTTP login error: %s", exc)
-            return None
+        return records
 
     # ──────────────────────────────────────────────────────────────────────
-    async def _login(self, page: Page) -> bool:
-        """
-        Authenticate with GSCCCA.
-
-        Strategy:
-          1. Use requests (plain HTTP) to login – bypasses headless bot detection.
-          2. Inject the resulting session cookies into the Playwright context.
-          3. Fall back to browser-based form fill if HTTP login fails.
-
-        Never raises. Returns True on success.
-        """
-        if not GSCCCA_USERNAME or not GSCCCA_PASSWORD:
-            log.warning("GSCCCA credentials not set – running unauthenticated")
-            return False
-
-        # ── Strategy 1: HTTP-based login (works on CI datacenter IPs) ────────
-        log.info("Attempting HTTP-based GSCCCA login …")
-        loop = asyncio.get_event_loop()
-        cookies = await loop.run_in_executor(None, self._http_login)
-
-        if cookies:
-            # Inject cookies into the Playwright browser context
-            playwright_cookies = []
-            for name, value in cookies.items():
-                playwright_cookies.append({
-                    "name":   name,
-                    "value":  value,
-                    "domain": "search.gsccca.org",
-                    "path":   "/",
-                })
-            try:
-                await page.context.add_cookies(playwright_cookies)
-                log.info(
-                    "✅ HTTP login succeeded – injected %d cookie(s) into browser: %s",
-                    len(playwright_cookies), [c["name"] for c in playwright_cookies]
-                )
-                return True
-            except Exception as exc:
-                log.error("Cookie injection failed: %s", exc)
-
-        # ── Strategy 2: Browser-based form fill fallback ──────────────────────
-        log.info("HTTP login failed – falling back to browser form fill …")
-        try:
-            await page.goto(GSCCCA_LOGIN_URL, wait_until="domcontentloaded")
-            try:
-                await page.wait_for_selector("input", timeout=15000)
-            except Exception:
-                pass
-            await page.wait_for_load_state("networkidle", timeout=15000)
-
-            log.info("Browser login page: url=%s title=%s", page.url, await page.title())
-
-            # Log all inputs for debugging
-            all_inputs = await page.locator("input").all()
-            log.info("Browser: found %d input(s):", len(all_inputs))
-            for inp in all_inputs:
-                try:
-                    log.info("  INPUT id=%r name=%r type=%r",
-                             await inp.get_attribute("id"),
-                             await inp.get_attribute("name"),
-                             await inp.get_attribute("type"))
-                except Exception:
-                    pass
-
-            if not all_inputs:
-                log.error(
-                    "Browser login: 0 inputs found. "
-                    "Bot detection is blocking the headless browser. "
-                    "Check 'gsccca-login-debug' artifact."
-                )
-                await page.screenshot(path="/tmp/gsccca_login_debug.png", full_page=True)
-                return False
-
-            # Fill first text input = username, first password input = password
-            for inp in all_inputs:
-                itype = (await inp.get_attribute("type") or "").lower()
-                if itype in ("text", "email", ""):
-                    await inp.fill(GSCCCA_USERNAME)
-                    log.info("Browser: filled username into type=%r", itype)
-                    break
-
-            for inp in all_inputs:
-                itype = (await inp.get_attribute("type") or "").lower()
-                if itype == "password":
-                    await inp.fill(GSCCCA_PASSWORD)
-                    log.info("Browser: filled password")
-                    break
-
-            # Submit
-            for sel in ["input[type='submit']", "button[type='submit']",
-                        "button:text('Login')", "input[value='Login']"]:
-                try:
-                    btn = page.locator(sel).first
-                    if await btn.is_visible(timeout=1000):
-                        await btn.click()
-                        await page.wait_for_load_state("networkidle", timeout=20000)
-                        break
-                except Exception:
-                    pass
-            else:
-                await page.keyboard.press("Enter")
-                await page.wait_for_load_state("networkidle", timeout=15000)
-
-            if "Login.aspx" not in page.url and "login.aspx" not in page.url:
-                log.info("✅ Browser login succeeded → %s", page.url)
-                return True
-
-            log.error("Browser login failed – still on login page")
-            await page.screenshot(path="/tmp/gsccca_login_debug.png", full_page=True)
-            return False
-
-        except Exception as exc:
-            log.error("Browser login fallback exception: %s", exc)
-            try:
-                await page.screenshot(path="/tmp/gsccca_login_debug.png", full_page=True)
-            except Exception:
-                pass
-            return False  # NEVER raise
-
-        # ──────────────────────────────────────────────────────────────────────
-    async def _dismiss_modals(self, page: Page) -> None:
-        """Click through any GSCCCA terms/disclaimer/cookie overlay."""
-        for sel in [
-            "input[value='I Agree']", "button:text('I Agree')",
-            "button:text('Accept')",  "a:text('I Agree')",
-            "#btnAgree", "[id*='Agree']", "[id*='agree']",
-            "button:text('OK')", "button:text('Continue')",
-        ]:
-            try:
-                btn = page.locator(sel).first
-                if await btn.is_visible(timeout=1500):
-                    await btn.click()
-                    await page.wait_for_load_state("networkidle", timeout=6000)
-                    log.info("Dismissed GSCCCA modal via: %s", sel)
-                    break
-            except Exception:
-                pass
-
-    # ──────────────────────────────────────────────────────────────────────
-    async def _load_search_page(self, page: Page) -> bool:
-        """Login to GSCCCA, then navigate to the Real Estate Index search."""
-        # Step 1 – authenticate
-        logged_in = await self._login(page)
-
-        # Step 2 – navigate to search
-        try:
-            await page.goto(self.SEARCH_URL, wait_until="domcontentloaded")
-            await page.wait_for_load_state("networkidle", timeout=15000)
-        except Exception as exc:
-            log.error("Failed to load GSCCCA search page post-login: %s", exc)
-            return False
-
-        # Step 3 – warn if still on login page (but keep going)
-        if "Login.aspx" in page.url or "login.aspx" in page.url:
-            log.warning(
-                "GSCCCA is showing login page – credentials may be wrong or "
-                "session did not persist. Attempting to scrape anyway."
-            )
-
-        # Step 4 – dismiss any modals
-        await self._dismiss_modals(page)
-
-        status = "authenticated" if logged_in else "UNAUTHENTICATED"
-        log.info("GSCCCA search page ready [%s]", status)
-        return True
-
-    # ──────────────────────────────────────────────────────────────────────
-    async def _set_county(self, page: Page, county_name: str = "FULTON", county_id: str = "60") -> bool:
-        """Select a county from the GSCCCA county dropdown."""
-        county_selectors = [
-            "select#cboCounty",
-            "select[name='cboCounty']",
-            "select[id*='County' i]",
-            "select[name*='County' i]",
-        ]
-        for sel in county_selectors:
-            try:
-                el = page.locator(sel).first
-                if await el.count() > 0:
-                    # Try by value, text, partial text
-                    for val in [county_id, county_name, county_name.title(), county_name.capitalize()]:
-                        try:
-                            await el.select_option(value=val)
-                            log.debug("County %s set by value=%s", county_name, val)
-                            return True
-                        except Exception:
-                            pass
-                    try:
-                        await el.select_option(label=county_name)
-                        return True
-                    except Exception:
-                        pass
-                    # Select by index if it contains "Fulton"
-                    options = await el.locator("option").all()
-                    for opt in options:
-                        text = (await opt.inner_text()).upper()
-                        val2 = await opt.get_attribute("value") or ""
-                        if county_name.upper() in text:
-                            await el.select_option(value=val2)
-                            log.info("County %s set via scan (value=%s)", county_name, val2)
-                            return True
-            except Exception:
-                pass
-        log.warning("Could not set county %s – skipping", county_name)
-        return False
-
-    # ──────────────────────────────────────────────────────────────────────
-    async def _set_instrument_type(self, page: Page, doc_code: str) -> bool:
-        """
-        Select the instrument type for doc_code.
-        Tries each candidate value/label in GSCCCA_INSTRUMENT_MAP[doc_code].
-        Returns True if a match was found, False if we should search all types
-        and filter client-side.
-        """
-        candidates = self.GSCCCA_INSTRUMENT_MAP.get(doc_code, [doc_code])
-
-        inst_selectors = [
-            "select#cboInstrumentType",
-            "select[name='cboInstrumentType']",
-            "select[id*='Instrument' i]",
-            "select[name*='Instrument' i]",
-            "select[id*='Type' i]",
-        ]
-
-        for sel in inst_selectors:
-            try:
-                el = page.locator(sel).first
-                if await el.count() == 0:
-                    continue
-
-                # Try every candidate
-                for cand in candidates:
-                    for method in ("value", "label"):
-                        try:
-                            if method == "value":
-                                await el.select_option(value=cand)
-                            else:
-                                await el.select_option(label=cand)
-                            log.debug("Instrument type set: %s via %s=%s", doc_code, method, cand)
-                            return True
-                        except Exception:
-                            pass
-
-                # Scan all options for partial match
-                options = await el.locator("option").all()
-                for opt in options:
-                    text = (await opt.inner_text()).upper()
-                    val  = await opt.get_attribute("value") or ""
-                    for cand in candidates:
-                        if cand.upper() in text or (val and cand.upper() in val.upper()):
-                            await el.select_option(value=val)
-                            log.info(
-                                "Instrument type %s matched via scan: '%s' (value=%s)",
-                                doc_code, text.strip(), val
-                            )
-                            return True
-
-            except Exception as exc:
-                log.debug("Instrument selector %s error: %s", sel, exc)
-
-        log.warning(
-            "No instrument dropdown match for %s – will search ALL types and filter",
-            doc_code
-        )
-        return False
-
-    # ──────────────────────────────────────────────────────────────────────
-    async def _set_date_range(
-        self, page: Page, start_date: str, end_date: str
-    ) -> None:
-        """Fill the From/To date fields on the GSCCCA search form."""
-        date_pairs = [
-            # (from_selector, to_selector)
-            ("input#txtDateFrom", "input#txtDateTo"),
-            ("input[name='txtDateFrom']", "input[name='txtDateTo']"),
-            ("input[id*='DateFrom' i]", "input[id*='DateTo' i]"),
-            ("input[id*='FromDate' i]", "input[id*='ToDate' i]"),
-            ("input[id*='StartDate' i]", "input[id*='EndDate' i]"),
-            ("input[placeholder*='From' i]", "input[placeholder*='To' i]"),
-        ]
-        for from_sel, to_sel in date_pairs:
-            try:
-                frm = page.locator(from_sel).first
-                too = page.locator(to_sel).first
-                if await frm.count() > 0 and await too.count() > 0:
-                    await frm.triple_click()
-                    await frm.fill(start_date)
-                    await too.triple_click()
-                    await too.fill(end_date)
-                    log.debug("Date range set: %s → %s", start_date, end_date)
-                    return
-            except Exception:
-                pass
-        log.warning("Could not set date range fields")
-
-    # ──────────────────────────────────────────────────────────────────────
-    async def _submit_search(self, page: Page) -> None:
-        """Click the Search / Submit button."""
-        for sel in [
-            "input#btnSearch",
-            "input[name='btnSearch']",
-            "button#btnSearch",
-            "input[value='Search']",
-            "input[value='Submit']",
-            "button:text('Search')",
-            "input[type='submit']",
-            "button[type='submit']",
-        ]:
-            try:
-                btn = page.locator(sel).first
-                if await btn.is_visible(timeout=3000):
-                    await btn.click()
-                    await page.wait_for_load_state("networkidle", timeout=20000)
-                    log.debug("Search submitted via: %s", sel)
-                    return
-            except Exception:
-                pass
-        # Fallback: Enter key
-        await page.keyboard.press("Enter")
-        await page.wait_for_load_state("networkidle", timeout=15000)
-
-    # ──────────────────────────────────────────────────────────────────────
-    def _parse_results_page(
+    def _parse_re_dashboard(
         self,
-        html: str,
-        doc_code: str,
-        filter_by_type: bool = False,
+        soup: BeautifulSoup,
+        instrument: str,
+        county: str,
     ) -> List[Dict[str, Any]]:
         """
-        Parse one page of GSCCCA results.
-        GSCCCA returns a GridView table with these columns (may vary):
-          Book/Page | Date Filed | Grantor | Grantee | Instrument Type | Description
-        Returns list of record dicts.
+        Parse GSCCCA Premium Instrument Type Search Dashboard results.
+        Each result block header row:
+          [COUNTY County]  [Book XXXXX Page YYY]  [INSTRUMENT]  [Filed: MM/DD/YYYY]
+        Expanded detail rows show Grantor, Grantee, links.
         """
         records: List[Dict[str, Any]] = []
-        soup = BeautifulSoup(html, "lxml")
 
-        # ── Find the results table ──
-        # GSCCCA uses a GridView with id containing 'GridView' or 'gvResults'
+        # Map instrument → our internal code
+        doc_code = next(
+            (k for k, v in RE_INSTRUMENTS.items() if v == instrument), "RE"
+        )
+        label = instrument
+        cat   = DOC_TYPES.get(doc_code, (instrument, "RE"))[1]
+
+        # The dashboard wraps each result in a containing table/div.
+        # Header rows contain Book/Page and Filed date.
+        # We find all elements matching the Book/Page/Filed pattern.
+        full_text = soup.get_text(" ")
+
+        # Find result header rows (dark background rows in the dashboard table)
+        # Pattern: "FULTON County   Book 70033 Page 534   DEED - FORECLOSURE   Filed: 4/21/2026"
+        result_rows = []
+        for el in soup.find_all(["tr", "div"]):
+            txt = el.get_text(" ", strip=True)
+            if (re.search(r"Book\s+\d+\s+Page\s+\d+", txt)
+                    and "Filed:" in txt
+                    and len(txt) < 300):
+                result_rows.append(el)
+
+        # For each result row, look at parent/sibling for grantor/grantee
+        processed_docs = set()
+        for row in result_rows:
+            try:
+                txt = row.get_text(" ", strip=True)
+                bp = re.search(r"Book\s+(\d+)\s+Page\s+(\d+)", txt)
+                if not bp:
+                    continue
+                book, pg = bp.group(1), bp.group(2)
+                doc_num = f"{book}/{pg}"
+                if doc_num in processed_docs:
+                    continue
+                processed_docs.add(doc_num)
+
+                filed_m = re.search(r"Filed:\s*([\d/]+)", txt)
+                filed = self._normalise_date(filed_m.group(1) if filed_m else "")
+
+                # Look for grantor/grantee in surrounding context
+                # Try the parent container
+                container = row.parent or row
+                ctxt = container.get_text(" ", strip=True)
+
+                grantor, grantee = "", ""
+                gtor_m = re.search(r"Grantor\s*[:\-]?\s*(.+?)(?:Grantee|Cross.Ref|View|Filed|\Z)",
+                                   ctxt, re.S | re.I)
+                gtee_m = re.search(r"Grantee\s*[:\-]?\s*(.+?)(?:Cross.Ref|View|Filed|\Z)",
+                                   ctxt, re.S | re.I)
+                if gtor_m:
+                    grantor = clean_str(re.sub(r"\s+", " ", gtor_m.group(1)))[:100]
+                if gtee_m:
+                    grantee = clean_str(re.sub(r"\s+", " ", gtee_m.group(1)))[:100]
+
+                # Direct URL
+                clerk_url = ""
+                view_a = container.find("a", string=re.compile(r"View Deed Information", re.I))
+                if view_a and view_a.get("href"):
+                    h = view_a["href"]
+                    clerk_url = h if h.startswith("http") else f"https://search.gsccca.org{h}"
+                if not clerk_url:
+                    cid = ALL_GA_COUNTIES.get(county.upper(), "")
+                    clerk_url = (
+                        f"https://search.gsccca.org/RealEstate/deedinfo.aspx"
+                        f"?county={cid}&book={book}&page={pg}"
+                    )
+
+                records.append({
+                    "doc_num":   doc_num,
+                    "doc_type":  label,
+                    "doc_code":  doc_code,
+                    "filed":     filed,
+                    "grantor":   grantor,
+                    "grantee":   grantee,
+                    "legal":     "",
+                    "amount":    "",
+                    "clerk_url": clerk_url,
+                    "county":    county.title(),
+                    "cat":       cat,
+                    "cat_label": CATEGORY_LABELS.get(cat, cat),
+                })
+            except Exception as exc:
+                log.debug("RE parse error: %s", exc)
+
+        return records
+
+    # ──────────────────────────────────────────────────────────────────────
+    def _search_lien(
+        self,
+        session: requests.Session,
+        doc_code: str,
+        instrument: str,
+        county: str,
+        start_date: str,
+        end_date: str,
+    ) -> List[Dict[str, Any]]:
+        """Search Lien Index by instrument type + county + date range."""
+        fields = self._get_aspnet_fields(session, GSCCCA_LIEN_SEARCH)
+
+        payload = {
+            **fields,
+            "PartyType":        "ALL",
+            "InstrumentType":   instrument,
+            "County":           county,
+            "SearchName":       "%",
+            "DateFrom":         start_date,
+            "DateThru":         end_date,
+            "Display":          "100",
+            "TableDisplayType": "Regular",
+            "SearchButton":     "Search",
+        }
+
+        try:
+            r = session.post(
+                GSCCCA_LIEN_SEARCH, data=payload, timeout=60,
+                headers={"Referer": GSCCCA_LIEN_SEARCH},
+            )
+            r.raise_for_status()
+        except Exception as exc:
+            log.error("Lien search error: %s", exc)
+            return []
+
+        if "login" in r.url.lower():
+            log.error("Lien search: redirected to login – cookies expired")
+            return []
+
+        soup = BeautifulSoup(r.text, "lxml")
+        return self._parse_lien_table(soup, doc_code, instrument, county)
+
+    # ──────────────────────────────────────────────────────────────────────
+    def _parse_lien_table(
+        self,
+        soup: BeautifulSoup,
+        doc_code: str,
+        instrument: str,
+        county: str,
+    ) -> List[Dict[str, Any]]:
+        """Parse lien index regular-style results table."""
+        records: List[Dict[str, Any]] = []
+        label, cat = DOC_TYPES.get(doc_code, (instrument, "LIEN"))
+
+        # Find the results table
         table = None
-        for tbl_id in ["GridView1", "gvResults", "GridViewResults",
-                        "dgResults", "ctl00_ContentPlaceHolder1_GridView1"]:
-            t = soup.find("table", {"id": tbl_id})
-            if t:
+        for t in soup.find_all("table"):
+            ths = [th.get_text(strip=True).lower() for th in t.find_all("th")]
+            if len(ths) >= 3 and any(
+                k in " ".join(ths) for k in ["book", "grantor", "date", "filed"]
+            ):
                 table = t
                 break
 
         if not table:
-            # Try any table with ≥4 columns
-            for t in soup.find_all("table"):
-                ths = t.find_all("th")
-                if len(ths) >= 4:
-                    table = t
-                    break
-
-        if not table:
-            # Check for "no records" message
-            no_rec = soup.find(string=re.compile(
-                r"no records|no results|0 record|nothing found|no data",
-                re.I
-            ))
-            if no_rec:
-                log.debug("GSCCCA: no records message found for %s", doc_code)
-            else:
-                log.debug("GSCCCA: no results table found for %s", doc_code)
             return []
 
-        # ── Map column headers ──
-        header_row = table.find("tr")
-        if not header_row:
-            return []
-        headers = [clean_str(th.get_text()) for th in header_row.find_all(["th", "td"])]
+        headers = [clean_str(th.get_text()) for th in table.find_all("th")]
+        col_map: Dict[str, int] = {}
+        for i, h in enumerate(headers):
+            hl = h.lower()
+            if "book" in hl:    col_map["book"]  = i
+            elif "page" in hl:  col_map["page"]  = i
+            elif "date" in hl or "filed" in hl: col_map["filed"] = i
+            elif "grantor" in hl: col_map["grantor"] = i
+            elif "grantee" in hl: col_map["grantee"] = i
+            elif "type" in hl:  col_map["type"]   = i
+            elif "amount" in hl or "$" in hl: col_map["amount"] = i
 
-        col_map = self._map_gsccca_columns(headers)
-        log.debug("GSCCCA columns: %s  →  col_map: %s", headers, col_map)
+        def cv(cells, f):
+            idx = col_map.get(f)
+            return clean_str(cells[idx].get_text()) if idx is not None and idx < len(cells) else ""
 
-        label, cat = DOC_TYPES.get(doc_code, (doc_code, doc_code))
-
-        # ── Parse data rows ──
         for tr in table.find_all("tr")[1:]:
             cells = tr.find_all(["td", "th"])
             if len(cells) < 3:
                 continue
             try:
-                def cv(field: str) -> str:
-                    idx = col_map.get(field)
-                    if idx is None or idx >= len(cells):
-                        return ""
-                    return clean_str(cells[idx].get_text())
-
-                def cl(field: str) -> str:
-                    """Get href from a cell."""
-                    idx = col_map.get(field)
-                    if idx is None or idx >= len(cells):
-                        return ""
-                    a = cells[idx].find("a", href=True)
-                    if not a:
-                        # Look for any link in the row
-                        for cell in cells:
-                            a = cell.find("a", href=True)
-                            if a:
-                                break
-                    if not a:
-                        return ""
-                    href = a["href"]
-                    return href if href.startswith("http") else urljoin(CLERK_BASE_URL, href)
-
-                # Book/Page → construct GSCCCA direct URL
-                book  = cv("book")
-                page_num_str = cv("page_num")
-                doc_num = f"{book}/{page_num_str}" if book and page_num_str else ""
-
-                # Also look for a "File Number" or direct doc ID
-                file_num = cv("file_num") or cv("doc_num")
-                if not doc_num and file_num:
-                    doc_num = file_num
-
-                # Try to get doc num from any cell link
-                clerk_url = cl("book") or cl("doc_num") or cl("grantor") or ""
-                if not doc_num:
-                    for cell in cells:
-                        a = cell.find("a", href=True)
-                        if a:
-                            text = clean_str(a.get_text())
-                            if text:
-                                doc_num = text
-                            href = a["href"]
-                            clerk_url = href if href.startswith("http") else urljoin(CLERK_BASE_URL, href)
-                            break
-
-                if not doc_num:
+                book = cv(cells, "book")
+                pg   = cv(cells, "page")
+                if not book:
                     continue
+                doc_num = f"{book}/{pg}" if pg else book
 
-                filed_raw = cv("filed") or cv("date")
-                inst_type = cv("inst_type") or label
-
-                # Filter client-side if we couldn't set instrument type
-                if filter_by_type:
-                    candidates = self.GSCCCA_INSTRUMENT_MAP.get(doc_code, [])
-                    match_found = any(
-                        c.upper() in inst_type.upper() for c in candidates
-                    )
-                    if not match_found:
-                        continue
-
-                # Build direct GSCCCA document URL if not already captured
-                if not clerk_url:
-                    # GSCCCA book/page URL pattern
-                    if book and page_num_str:
-                        clerk_url = (
-                            f"https://search.gsccca.org/RealEstateIndex.aspx"
-                            f"?county={GSCCCA_COUNTY_NUM}&book={book}&page={page_num_str}"
-                            f"&instrumenttype={doc_code}"
-                        )
+                # Link
+                clerk_url = ""
+                for cell in cells:
+                    a = cell.find("a", href=True)
+                    if a:
+                        h = a["href"]
+                        clerk_url = h if h.startswith("http") else \
+                                    f"https://search.gsccca.org{h}"
+                        break
 
                 records.append({
                     "doc_num":   doc_num,
-                    "doc_type":  inst_type if inst_type else label,
+                    "doc_type":  cv(cells, "type") or label,
                     "doc_code":  doc_code,
-                    "filed":     self._normalise_date(filed_raw),
-                    "grantor":   cv("grantor"),
-                    "grantee":   cv("grantee"),
-                    "legal":     cv("legal"),
-                    "amount":    cv("amount"),
+                    "filed":     self._normalise_date(cv(cells, "filed")),
+                    "grantor":   cv(cells, "grantor"),
+                    "grantee":   cv(cells, "grantee"),
+                    "legal":     "",
+                    "amount":    cv(cells, "amount"),
                     "clerk_url": clerk_url,
+                    "county":    county.title(),
                     "cat":       cat,
                     "cat_label": CATEGORY_LABELS.get(cat, cat),
                 })
-            except Exception as exc:
-                log.debug("Row parse error: %s", exc)
-
-        return records
-
-    # ──────────────────────────────────────────────────────────────────────
-    @staticmethod
-    def _map_gsccca_columns(headers: List[str]) -> Dict[str, int]:
-        """Map GSCCCA column headers → index."""
-        mapping: Dict[str, int] = {}
-        patterns = {
-            "book":      r"book",
-            "page_num":  r"\bpage\b",
-            "file_num":  r"file\s*(no|num|number)|doc\s*(no|num)",
-            "filed":     r"date|filed|record",
-            "grantor":   r"grantor|seller|owner|from|debtor",
-            "grantee":   r"grantee|buyer|lender|to\b|creditor",
-            "inst_type": r"instrument|type|doc.?type",
-            "legal":     r"legal|desc|property|parcel",
-            "amount":    r"amount|consider|value|\$",
-            "doc_num":   r"doc.?(num|no\b|number)|instrument.?no",
-        }
-        for idx, header in enumerate(headers):
-            h = header.lower()
-            for field, pattern in patterns.items():
-                if field not in mapping and re.search(pattern, h):
-                    mapping[field] = idx
-        return mapping
-
-    # ──────────────────────────────────────────────────────────────────────
-    async def _paginate(
-        self,
-        page: Page,
-        doc_code: str,
-        filter_by_type: bool,
-    ) -> List[Dict[str, Any]]:
-        """
-        Collect all result pages for the current search.
-        GSCCCA paginates via __doPostBack or numbered page links.
-        """
-        all_records: List[Dict[str, Any]] = []
-        current_page = 1
-
-        while current_page <= MAX_PAGES_PER_DOCTYPE:
-            await page.wait_for_load_state("domcontentloaded")
-            html = await page.content()
-
-            recs = self._parse_results_page(html, doc_code, filter_by_type)
-            all_records.extend(recs)
-            log.info(
-                "  Page %d → %d records (total so far: %d)",
-                current_page, len(recs), len(all_records)
-            )
-
-            # Check for no results on first page
-            if current_page == 1 and not recs:
-                break
-
-            # ── Pagination navigation ──
-            soup = BeautifulSoup(html, "lxml")
-            moved = await self._go_next_page(page, soup, current_page)
-            if not moved:
-                break
-            current_page += 1
-            await asyncio.sleep(1.0)  # polite delay
-
-        return all_records
-
-    # ──────────────────────────────────────────────────────────────────────
-    async def _go_next_page(
-        self, page: Page, soup: BeautifulSoup, current_page: int
-    ) -> bool:
-        """Navigate to the next result page. Returns True on success."""
-
-        # ── Strategy 1: Look for ">" or "Next" link in pager row ──
-        pager_cells = soup.find_all("td", {"colspan": True})
-        for cell in pager_cells:
-            for a in cell.find_all("a"):
-                text = clean_str(a.get_text())
-                href = a.get("href", "")
-                if text in (">", "Next", "»", "next"):
-                    # __doPostBack link
-                    if "doPostBack" in href or "javascript" in href.lower():
-                        try:
-                            await page.locator(f"a:text('{text}')").first.click()
-                            await page.wait_for_load_state("networkidle", timeout=15000)
-                            return True
-                        except Exception:
-                            pass
-                    elif href and href not in ("#", ""):
-                        full = href if href.startswith("http") else urljoin(CLERK_BASE_URL, href)
-                        try:
-                            await page.goto(full, wait_until="networkidle")
-                            return True
-                        except Exception:
-                            pass
-
-        # ── Strategy 2: Numbered page links ──
-        next_num = str(current_page + 1)
-        try:
-            # GSCCCA uses a table row of page numbers; next page is a link (current page is plain text)
-            next_link = page.locator(
-                f"a:text-is('{next_num}')"
-            ).first
-            if await next_link.is_visible(timeout=1500):
-                await next_link.click()
-                await page.wait_for_load_state("networkidle", timeout=15000)
-                return True
-        except Exception:
-            pass
-
-        # ── Strategy 3: Playwright ">" button ──
-        for sel in [
-            "a:text('>')", "a:text('»')", "a:text('Next')",
-            "[title='Next Page']", "[aria-label='Next']",
-        ]:
-            try:
-                btn = page.locator(sel).first
-                if await btn.is_visible(timeout=1000):
-                    await btn.click()
-                    await page.wait_for_load_state("networkidle", timeout=15000)
-                    return True
             except Exception:
                 pass
 
-        # ── Strategy 4: Direct __doPostBack call via JS ──
-        try:
-            await page.evaluate(
-                f"__doPostBack('GridView1','Page${current_page + 1}')"
-            )
-            await page.wait_for_load_state("networkidle", timeout=15000)
-            html_after = await page.content()
-            # Verify page actually changed
-            if f"Page${current_page + 1}" not in html_after:
-                return True  # assume navigation worked
-        except Exception:
-            pass
-
-        return False  # No more pages
-
-    # ──────────────────────────────────────────────────────────────────────
-    async def _scrape_one_type(
-        self,
-        page: Page,
-        doc_code: str,
-        start_date: str,
-        end_date: str,
-        county_name: str = "FULTON",
-        county_id: str = "60",
-    ) -> List[Dict[str, Any]]:
-        """Full search cycle for a single document type + county."""
-        try:
-            await page.goto(self.SEARCH_URL, wait_until="domcontentloaded")
-            await page.wait_for_load_state("networkidle", timeout=12000)
-        except Exception as exc:
-            log.warning("Navigation reset failed for %s/%s: %s", county_name, doc_code, exc)
-
-        # Set county
-        await self._set_county(page, county_name, county_id)
-
-        # Set instrument type
-        matched = await self._set_instrument_type(page, doc_code)
-
-        # Set date range
-        await self._set_date_range(page, start_date, end_date)
-
-        # Submit
-        await self._submit_search(page)
-
-        # Collect all pages – tag each record with county
-        records = await self._paginate(page, doc_code, filter_by_type=not matched)
-        for rec in records:
-            rec.setdefault("county", county_name.title())
         return records
 
     # ──────────────────────────────────────────────────────────────────────
-    async def scrape_all(
+    def scrape_all(
         self, start_date: str, end_date: str
     ) -> List[Dict[str, Any]]:
         """
-        Scrape ACTIVE_COUNTIES x all doc types from GSCCCA.
-        County list is resolved from the COUNTIES env var at startup.
-        Returns deduplicated list of raw clerk records tagged with county.
+        Main entry point. HTTP-based, no browser.
+        Loops ACTIVE_COUNTIES x (RE_INSTRUMENTS + LIEN_INSTRUMENTS).
         """
         all_records: List[Dict[str, Any]] = []
         seen: set = set()
-        total_counties = len(ACTIVE_COUNTIES)
+        session = self._build_session()
 
         log.info(
-            "Scraping %d %s: %s",
-            total_counties,
-            "county" if total_counties == 1 else "counties",
-            ", ".join(n for n, _ in ACTIVE_COUNTIES),
+            "Scraping %d counties | %d RE + %d lien instrument types",
+            len(ACTIVE_COUNTIES), len(RE_INSTRUMENTS), len(LIEN_INSTRUMENTS),
         )
 
-        ctx, page = await self._new_page()
-        try:
-            loaded = await self._load_search_page(page)
-            if not loaded:
-                log.warning(
-                    "GSCCCA search page did not load cleanly – "
-                    "continuing anyway (may get partial or no results)"
-                )
+        for c_idx, (county_name, county_id) in enumerate(ACTIVE_COUNTIES, 1):
+            log.info("▶ County %d/%d: %s", c_idx, len(ACTIVE_COUNTIES), county_name)
+            county_new = 0
 
-            for c_idx, (county_name, county_id) in enumerate(ACTIVE_COUNTIES, 1):
-                log.info(
-                    "▶ County %d/%d: %s (id=%s)",
-                    c_idx, total_counties, county_name, county_id,
-                )
-                county_new = 0
+            for doc_code, instrument in RE_INSTRUMENTS.items():
+                log.info("  ┣━ RE %s – %s", doc_code, instrument)
+                try:
+                    recs = self._search_re(
+                        session, instrument, county_name, start_date, end_date
+                    )
+                    for rec in recs:
+                        key = f"{county_name}|{rec['doc_num']}"
+                        if key not in seen and rec.get("doc_num"):
+                            seen.add(key)
+                            all_records.append(rec)
+                            county_new += 1
+                except Exception as exc:
+                    log.error("RE %s/%s: %s", county_name, instrument, exc)
+                time.sleep(0.5)
 
-                for doc_code in DOC_TYPES:
-                    log.info("  ┣━ %s – %s", doc_code, DOC_TYPES[doc_code][0])
-                    try:
-                        records = await self._scrape_one_type(
-                            page, doc_code, start_date, end_date,
-                            county_name=county_name, county_id=county_id,
-                        )
-                        for rec in records:
-                            key = f"{county_name}|{rec.get('doc_code','')}|{rec.get('doc_num','')}"
-                            if key not in seen and rec.get("doc_num"):
-                                seen.add(key)
-                                all_records.append(rec)
-                                county_new += 1
-                        log.info("    → %d new records", len(records))
-                    except Exception as exc:
-                        log.error(
-                            "Error %s/%s: %s\n%s",
-                            county_name, doc_code, exc, traceback.format_exc(),
-                        )
-                    await asyncio.sleep(1.5)
+            for doc_code, instrument in LIEN_INSTRUMENTS.items():
+                log.info("  ┣━ Lien %s – %s", doc_code, instrument)
+                try:
+                    recs = self._search_lien(
+                        session, doc_code, instrument,
+                        county_name, start_date, end_date
+                    )
+                    for rec in recs:
+                        key = f"{county_name}|{rec['doc_num']}"
+                        if key not in seen and rec.get("doc_num"):
+                            seen.add(key)
+                            all_records.append(rec)
+                            county_new += 1
+                except Exception as exc:
+                    log.error("Lien %s/%s: %s", county_name, instrument, exc)
+                time.sleep(0.5)
 
-                log.info(
-                    "  ✓ %s done – %d records", county_name, county_new
-                )
-                if c_idx < total_counties:
-                    await asyncio.sleep(3.0)  # pause between counties
-
-            await page.close()
-        finally:
-            await ctx.close()
+            log.info("  ✓ %s – %d new records", county_name, county_new)
+            if c_idx < len(ACTIVE_COUNTIES):
+                time.sleep(1.0)
 
         log.info(
-            "Total GSCCCA records: %d across %d counties",
-            len(all_records), total_counties
+            "Total: %d records across %d counties",
+            len(all_records), len(ACTIVE_COUNTIES)
         )
         return all_records
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1976,33 +1510,15 @@ async def main() -> None:
     except Exception as exc:
         log.error("Parcel load failed (continuing without address enrichment): %s", exc)
 
-    # ── Step 2: Scrape clerk portal ──
+    # ── Step 2: Scrape GSCCCA via HTTP requests ──
     raw_records: List[Dict[str, Any]] = []
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=HEADLESS,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                # Stealth: hide automation fingerprints
-                "--disable-blink-features=AutomationControlled",
-                "--disable-features=IsolateOrigins,site-per-process",
-                "--disable-extensions",
-                "--disable-default-apps",
-                "--disable-infobars",
-                "--window-size=1280,800",
-                "--start-maximized",
-            ],
+    try:
+        scraper = ClerkScraper()
+        raw_records = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: scraper.scrape_all(start_date, end_date)
         )
-        try:
-            scraper = ClerkScraper(browser)
-            raw_records = await scraper.scrape_all(start_date, end_date)
-        except Exception as exc:
-            log.error("Clerk scraper failed: %s\n%s", exc, traceback.format_exc())
-        finally:
-            await browser.close()
+    except Exception as exc:
+        log.error("Clerk scraper failed: %s\n%s", exc, traceback.format_exc())
 
     log.info("Raw records from clerk portal: %d", len(raw_records))
 
