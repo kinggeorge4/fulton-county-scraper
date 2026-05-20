@@ -680,7 +680,7 @@ class ParcelLookup:
 # Auth: GSCCCA_COOKIES secret (JSON from get_gsccca_cookie.py)
 # ─────────────────────────────────────────────────────────────────────────────
 
-GSCCCA_RE_SEARCH   = "https://search.gsccca.org/RealEstate/InstrumentTypeSearch.aspx"
+GSCCCA_RE_SEARCH   = "https://search.gsccca.org/RealEstate/namesearch.asp"
 GSCCCA_LIEN_SEARCH = "https://search.gsccca.org/Lien/namesearch.asp"
 
 # Exact instrument dropdown values from the GSCCCA Real Estate Index
@@ -843,23 +843,30 @@ class ClerkScraper:
         start_date: str,
         end_date: str,
     ) -> List[Dict[str, Any]]:
-        """Search Real Estate Instrument Type Search (Premium)."""
-        records: List[Dict[str, Any]] = []
+        """
+        Search Real Estate Index via namesearch.asp (same endpoint as Lien).
+        Uses % wildcard with instrument type selected — works without Premium
+        and without IP restrictions.
+        Form rule: short names (<=2 chars) require an instrument type selected.
+        """
+        all_records: List[Dict[str, Any]] = []
         fields = self._get_aspnet_fields(session, GSCCCA_RE_SEARCH)
 
         payload = {
             **fields,
+            "PartyType":        "ALL",
             "InstrumentType":   instrument,
             "County":           county,
+            "SearchName":       "%",
             "DateFrom":         start_date,
             "DateThru":         end_date,
             "Display":          "100",
-            "TableDisplayType": "Dashboard",
-            "SearchButton":     "Begin Search",
+            "TableDisplayType": "Regular",
+            "SearchButton":     "Search",
         }
 
-        page_url = GSCCCA_RE_SEARCH
         page_num = 0
+        current_url = GSCCCA_RE_SEARCH
 
         while page_num < MAX_PAGES_PER_DOCTYPE:
             page_num += 1
@@ -870,7 +877,7 @@ class ClerkScraper:
                         headers={"Referer": GSCCCA_RE_SEARCH},
                     )
                 else:
-                    r = session.get(page_url, timeout=30)
+                    r = session.get(current_url, timeout=30)
                 r.raise_for_status()
             except Exception as exc:
                 log.error("RE search error page %d: %s", page_num, exc)
@@ -881,122 +888,108 @@ class ClerkScraper:
                 break
 
             soup = BeautifulSoup(r.text, "lxml")
-            page_recs = self._parse_re_dashboard(soup, instrument, county)
-            records.extend(page_recs)
+
+            # Map instrument → our doc code
+            doc_code = next(
+                (k for k, v in RE_INSTRUMENTS.items() if v == instrument), "RE"
+            )
+            page_recs = self._parse_re_table(soup, doc_code, instrument, county)
+            all_records.extend(page_recs)
             log.info("    Page %d → %d records", page_num, len(page_recs))
 
             if not page_recs:
                 break
 
-            # Next page link
-            next_a = soup.find("a", string="[Next Page]")
+            # Pagination
+            next_a = soup.find("a", string=re.compile(r"Next|>", re.I))
             if not next_a or not next_a.get("href"):
                 break
             href = next_a["href"]
-            page_url = href if href.startswith("http") else \
-                       "https://search.gsccca.org" + href
+            current_url = href if href.startswith("http") else                           "https://search.gsccca.org" + href
 
-        return records
+        return all_records
 
-    # ──────────────────────────────────────────────────────────────────────
-    def _parse_re_dashboard(
+    def _parse_re_table(
         self,
         soup: BeautifulSoup,
+        doc_code: str,
         instrument: str,
         county: str,
     ) -> List[Dict[str, Any]]:
-        """
-        Parse GSCCCA Premium Instrument Type Search Dashboard results.
-        Each result block header row:
-          [COUNTY County]  [Book XXXXX Page YYY]  [INSTRUMENT]  [Filed: MM/DD/YYYY]
-        Expanded detail rows show Grantor, Grantee, links.
-        """
+        """Parse Real Estate namesearch.asp Regular table results."""
         records: List[Dict[str, Any]] = []
+        label, cat = DOC_TYPES.get(doc_code, (instrument, "RE"))
 
-        # Map instrument → our internal code
-        doc_code = next(
-            (k for k, v in RE_INSTRUMENTS.items() if v == instrument), "RE"
-        )
-        label = instrument
-        cat   = DOC_TYPES.get(doc_code, (instrument, "RE"))[1]
+        # Find results table
+        table = None
+        for t in soup.find_all("table"):
+            ths = [th.get_text(strip=True).lower() for th in t.find_all("th")]
+            if len(ths) >= 3 and any(
+                k in " ".join(ths) for k in ["book", "grantor", "date", "filed", "name"]
+            ):
+                table = t
+                break
 
-        # The dashboard wraps each result in a containing table/div.
-        # Header rows contain Book/Page and Filed date.
-        # We find all elements matching the Book/Page/Filed pattern.
-        full_text = soup.get_text(" ")
+        if not table:
+            # Check for "no records found" message
+            body = soup.get_text()
+            if re.search(r"no record|no result|0 record", body, re.I):
+                log.debug("RE %s/%s: no records found", county, instrument)
+            return []
 
-        # Find result header rows (dark background rows in the dashboard table)
-        # Pattern: "FULTON County   Book 70033 Page 534   DEED - FORECLOSURE   Filed: 4/21/2026"
-        result_rows = []
-        for el in soup.find_all(["tr", "div"]):
-            txt = el.get_text(" ", strip=True)
-            if (re.search(r"Book\s+\d+\s+Page\s+\d+", txt)
-                    and "Filed:" in txt
-                    and len(txt) < 300):
-                result_rows.append(el)
+        headers = [clean_str(th.get_text()) for th in table.find_all("th")]
+        col_map: Dict[str, int] = {}
+        for i, h in enumerate(headers):
+            hl = h.lower()
+            if "book" in hl:               col_map["book"]    = i
+            elif "page" in hl:             col_map["page"]    = i
+            elif "date" in hl or "filed" in hl: col_map["filed"] = i
+            elif "grantor" in hl or "party" in hl or "name" in hl:
+                col_map["grantor"] = i
+            elif "grantee" in hl:          col_map["grantee"] = i
+            elif "type" in hl:             col_map["type"]    = i
+            elif "amount" in hl or "$" in hl: col_map["amount"] = i
 
-        # For each result row, look at parent/sibling for grantor/grantee
-        processed_docs = set()
-        for row in result_rows:
+        def cv(cells, f):
+            idx = col_map.get(f)
+            return clean_str(cells[idx].get_text()) if idx is not None and idx < len(cells) else ""
+
+        for tr in table.find_all("tr")[1:]:
+            cells = tr.find_all(["td", "th"])
+            if len(cells) < 3:
+                continue
             try:
-                txt = row.get_text(" ", strip=True)
-                bp = re.search(r"Book\s+(\d+)\s+Page\s+(\d+)", txt)
-                if not bp:
+                book = cv(cells, "book")
+                pg   = cv(cells, "page")
+                if not book:
                     continue
-                book, pg = bp.group(1), bp.group(2)
-                doc_num = f"{book}/{pg}"
-                if doc_num in processed_docs:
-                    continue
-                processed_docs.add(doc_num)
+                doc_num = f"{book}/{pg}" if pg else book
 
-                filed_m = re.search(r"Filed:\s*([\d/]+)", txt)
-                filed = self._normalise_date(filed_m.group(1) if filed_m else "")
-
-                # Look for grantor/grantee in surrounding context
-                # Try the parent container
-                container = row.parent or row
-                ctxt = container.get_text(" ", strip=True)
-
-                grantor, grantee = "", ""
-                gtor_m = re.search(r"Grantor\s*[:\-]?\s*(.+?)(?:Grantee|Cross.Ref|View|Filed|\Z)",
-                                   ctxt, re.S | re.I)
-                gtee_m = re.search(r"Grantee\s*[:\-]?\s*(.+?)(?:Cross.Ref|View|Filed|\Z)",
-                                   ctxt, re.S | re.I)
-                if gtor_m:
-                    grantor = clean_str(re.sub(r"\s+", " ", gtor_m.group(1)))[:100]
-                if gtee_m:
-                    grantee = clean_str(re.sub(r"\s+", " ", gtee_m.group(1)))[:100]
-
-                # Direct URL
+                # Get view link
                 clerk_url = ""
-                view_a = container.find("a", string=re.compile(r"View Deed Information", re.I))
-                if view_a and view_a.get("href"):
-                    h = view_a["href"]
-                    clerk_url = h if h.startswith("http") else f"https://search.gsccca.org{h}"
-                if not clerk_url:
-                    cid = ALL_GA_COUNTIES.get(county.upper(), "")
-                    clerk_url = (
-                        f"https://search.gsccca.org/RealEstate/deedinfo.aspx"
-                        f"?county={cid}&book={book}&page={pg}"
-                    )
+                for cell in cells:
+                    a = cell.find("a", href=True)
+                    if a:
+                        h = a["href"]
+                        clerk_url = h if h.startswith("http") else                                     f"https://search.gsccca.org{h}"
+                        break
 
                 records.append({
                     "doc_num":   doc_num,
-                    "doc_type":  label,
+                    "doc_type":  cv(cells, "type") or label,
                     "doc_code":  doc_code,
-                    "filed":     filed,
-                    "grantor":   grantor,
-                    "grantee":   grantee,
+                    "filed":     self._normalise_date(cv(cells, "filed")),
+                    "grantor":   cv(cells, "grantor"),
+                    "grantee":   cv(cells, "grantee"),
                     "legal":     "",
-                    "amount":    "",
+                    "amount":    cv(cells, "amount"),
                     "clerk_url": clerk_url,
                     "county":    county.title(),
                     "cat":       cat,
                     "cat_label": CATEGORY_LABELS.get(cat, cat),
                 })
-            except Exception as exc:
-                log.debug("RE parse error: %s", exc)
-
+            except Exception:
+                pass
         return records
 
     # ──────────────────────────────────────────────────────────────────────
