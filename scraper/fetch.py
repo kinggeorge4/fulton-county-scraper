@@ -796,10 +796,24 @@ class ClerkScraper:
     def _get_aspnet_fields(
         self, session: requests.Session, url: str
     ) -> Dict[str, str]:
-        """GET a page and return its ASP.NET hidden form fields."""
+        """GET a page, log ALL form inputs, return hidden ASP.NET fields."""
         try:
             r = session.get(url, timeout=30)
             soup = BeautifulSoup(r.text, "lxml")
+
+            # Log ALL inputs so we can see actual field names
+            all_inputs = soup.find_all("input")
+            all_selects = soup.find_all("select")
+            log.info("Form inputs on %s:", url.split("/")[-1])
+            for inp in all_inputs:
+                log.info("  INPUT name=%r type=%r value=%r",
+                    inp.get("name",""), inp.get("type","text"),
+                    (inp.get("value","") or "")[:40])
+            for sel in all_selects:
+                opts = [o.get("value","") for o in sel.find_all("option")][:5]
+                log.info("  SELECT name=%r options(first5)=%s",
+                    sel.get("name",""), opts)
+
             fields = {}
             for name in ["__VIEWSTATE", "__VIEWSTATEGENERATOR",
                          "__EVENTVALIDATION", "__EVENTTARGET", "__EVENTARGUMENT"]:
@@ -860,7 +874,7 @@ class ClerkScraper:
             "SearchName":       "%",
             "DateFrom":         start_date,
             "DateThru":         end_date,
-            "Display":          "100",
+            "Display":          "20",
             "TableDisplayType": "Regular",
             "SearchButton":     "Search",
         }
@@ -882,6 +896,10 @@ class ClerkScraper:
             except Exception as exc:
                 log.error("RE search error page %d: %s", page_num, exc)
                 break
+
+            log.info("RE POST response: status=%d url=%s", r.status_code, r.url)
+            if page_num == 1:
+                log.info("RE response HTML (first 1000):\n%s", r.text[:1000])
 
             if "login" in r.url.lower():
                 log.error("RE search: redirected to login – cookies expired")
@@ -931,10 +949,10 @@ class ClerkScraper:
                 break
 
         if not table:
-            # Check for "no records found" message
             body = soup.get_text()
-            if re.search(r"no record|no result|0 record", body, re.I):
-                log.debug("RE %s/%s: no records found", county, instrument)
+            html_snippet = str(soup)[:3000]
+            log.info("RE parse: no table found for %s/%s. HTML snippet:\n%s",
+                     county, instrument, html_snippet)
             return []
 
         headers = [clean_str(th.get_text()) for th in table.find_all("th")]
@@ -1013,7 +1031,7 @@ class ClerkScraper:
             "SearchName":       "%",
             "DateFrom":         start_date,
             "DateThru":         end_date,
-            "Display":          "100",
+            "Display":          "20",
             "TableDisplayType": "Regular",
             "SearchButton":     "Search",
         }
